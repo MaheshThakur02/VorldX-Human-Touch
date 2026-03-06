@@ -8,6 +8,7 @@ import {
   type ToolName,
   type ToolPrincipalType
 } from "@/lib/storage/org-storage";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseTool(value: unknown): ToolName {
   if (value === "GOOGLE_DRIVE") return "GOOGLE_DRIVE";
@@ -25,6 +26,10 @@ export async function GET(request: NextRequest) {
   const orgId = request.nextUrl.searchParams.get("orgId")?.trim();
   if (!orgId) {
     return NextResponse.json({ ok: false, message: "orgId query param is required." }, { status: 400 });
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const [connectors, grants] = await Promise.all([
@@ -78,6 +83,10 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const grant = await upsertStorageToolGrant({
     orgId,
@@ -112,6 +121,10 @@ export async function DELETE(request: NextRequest) {
       { ok: false, message: "orgId and grantId are required." },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const deleted = await deleteStorageToolGrant(orgId, grantId);

@@ -2713,6 +2713,11 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
       return { ok: false, error: "task.resumed target not found for org." };
     }
 
+    const resumedTrace = asRecord(task.executionTrace);
+    const runtimeTrace = asRecord(resumedTrace.agentRuntime);
+    const resumedAgentId = asString(runtimeTrace.logicalAgentId);
+    const resumedAgentRunId = asString(runtimeTrace.agentRunId);
+
     await prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
@@ -2729,6 +2734,31 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
           status: FlowStatus.ACTIVE
         }
       });
+
+      if (resumedAgentId) {
+        await tx.agent.updateMany({
+          where: {
+            id: resumedAgentId,
+            orgId
+          },
+          data: {
+            status: AgentStatus.ACTIVE
+          }
+        });
+      }
+
+      if (resumedAgentRunId) {
+        await tx.agentRun.updateMany({
+          where: {
+            id: resumedAgentRunId,
+            orgId,
+            status: AgentStatus.WAITING_HUMAN
+          },
+          data: {
+            status: AgentStatus.COMPLETED
+          }
+        });
+      }
 
       await tx.log.create({
         data: {
@@ -2758,7 +2788,6 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
       }
     });
 
-    const resumedTrace = asRecord(task.executionTrace);
     const executionResult = await executeTaskById(
       taskId,
       orgId,

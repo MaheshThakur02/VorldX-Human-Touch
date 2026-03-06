@@ -12,6 +12,7 @@ import { prisma } from "@/lib/db/prisma";
 import { encryptBrainKey } from "@/lib/security/crypto";
 import { featureFlags } from "@/lib/config/feature-flags";
 import { recordPassivePolicy, recordPassiveSpend } from "@/lib/enterprise/passive";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseType(value: string | undefined): PersonnelType | null {
   if (value === "HUMAN") return PersonnelType.HUMAN;
@@ -47,6 +48,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const [personnel, linkedAccounts, capabilityGrants] = await Promise.all([
@@ -138,6 +143,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const org = await prisma.organization.findUnique({

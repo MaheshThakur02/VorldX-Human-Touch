@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 export async function GET(request: NextRequest) {
   const orgId = request.nextUrl.searchParams.get("orgId")?.trim();
@@ -12,6 +13,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const [linkedAccounts, personnel, grants] = await Promise.all([

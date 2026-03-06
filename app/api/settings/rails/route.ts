@@ -2,6 +2,7 @@ import { LogType, Prisma, SovereignRailType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseRailType(value: string | undefined): SovereignRailType | null {
   if (!value) return null;
@@ -29,6 +30,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const rails = await prisma.sovereignRailConfig.findMany({
@@ -74,6 +79,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   if (!isValidHttpUrl(baseUrl)) {

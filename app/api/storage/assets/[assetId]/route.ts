@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deleteOrgStorageAsset, updateOrgStorageAsset, type ToolPrincipalType } from "@/lib/storage/org-storage";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: Promise<{
@@ -37,6 +38,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const updated = await updateOrgStorageAsset(orgId, assetId, {
     ...(body?.name !== undefined ? { name: body.name } : {}),
@@ -70,6 +75,10 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const deleted = await deleteOrgStorageAsset(orgId, assetId);
   if (!deleted) {
@@ -80,4 +89,3 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     ok: true
   });
 }
-

@@ -6,6 +6,7 @@ import {
   type MissionSchedule,
   updateMissionSchedule
 } from "@/lib/schedule/mission-schedules";
+import { buildInternalApiHeaders } from "@/lib/security/internal-api";
 
 interface FlowLaunchResponse {
   ok?: boolean;
@@ -77,7 +78,8 @@ export async function runMissionSchedule(
     response = await fetch(`${input.origin}/api/flows`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        ...buildInternalApiHeaders()
       },
       body: JSON.stringify({
         orgId: input.orgId,

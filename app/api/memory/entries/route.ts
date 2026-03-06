@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
 import { featureFlags } from "@/lib/config/feature-flags";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseTier(value: string | undefined): MemoryTier | null {
   if (value === "WORKING") return MemoryTier.WORKING;
@@ -20,6 +21,10 @@ export async function GET(request: NextRequest) {
       { ok: false, message: "orgId query param is required." },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const entries = await prisma.memoryEntry.findMany({
@@ -63,6 +68,10 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const ttlSeconds =
     typeof body?.ttlSeconds === "number" && body.ttlSeconds > 0 ? Math.floor(body.ttlSeconds) : null;
@@ -84,4 +93,3 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ ok: true, entry }, { status: 201 });
 }
-

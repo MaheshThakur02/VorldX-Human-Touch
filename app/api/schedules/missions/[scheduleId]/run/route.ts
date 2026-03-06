@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { runMissionSchedule } from "@/lib/schedule/mission-runner";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: Promise<{
@@ -32,6 +33,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const { scheduleId } = await context.params;

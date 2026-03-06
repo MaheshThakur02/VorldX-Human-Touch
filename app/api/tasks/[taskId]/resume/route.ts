@@ -1,4 +1,4 @@
-import { FlowStatus, LogType, TaskStatus } from "@prisma/client";
+import { AgentStatus, FlowStatus, LogType, TaskStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
@@ -21,6 +21,17 @@ interface RouteContext {
   params: {
     taskId: string;
   };
+}
+
+function asRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {} as Record<string, unknown>;
+  }
+  return value as Record<string, unknown>;
+}
+
+function asString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
@@ -95,6 +106,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
       { status: 403 }
     );
   }
+
+  const trace = asRecord(task.executionTrace);
+  const runtimeTrace = asRecord(trace.agentRuntime);
+  const runtimeAgentId = asString(runtimeTrace.logicalAgentId);
+  const runtimeAgentRunId = asString(runtimeTrace.agentRunId);
 
   const fileUrl = body.fileUrl?.trim();
   const fileUrlsFromBody = Array.isArray(body.fileUrls)
@@ -176,6 +192,46 @@ export async function POST(request: NextRequest, context: RouteContext) {
         complianceHash
       }
     });
+
+    await tx.approvalCheckpoint.updateMany({
+      where: {
+        orgId,
+        flowId: task.flowId,
+        taskId: task.id,
+        status: "PENDING"
+      },
+      data: {
+        status: "APPROVED",
+        resolvedAt: new Date(),
+        resolvedByUserId: humanActorId,
+        resolutionNote: note || "Resolved via task resume."
+      }
+    });
+
+    if (runtimeAgentId) {
+      await tx.agent.updateMany({
+        where: {
+          id: runtimeAgentId,
+          orgId
+        },
+        data: {
+          status: AgentStatus.ACTIVE
+        }
+      });
+    }
+
+    if (runtimeAgentRunId) {
+      await tx.agentRun.updateMany({
+        where: {
+          id: runtimeAgentRunId,
+          orgId,
+          status: AgentStatus.WAITING_HUMAN
+        },
+        data: {
+          status: AgentStatus.COMPLETED
+        }
+      });
+    }
 
     return nextTask;
   });

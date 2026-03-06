@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createMissionSchedule, listMissionSchedules } from "@/lib/schedule/mission-schedules";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 export async function GET(request: NextRequest) {
   const orgId = request.nextUrl.searchParams.get("orgId")?.trim();
@@ -12,6 +13,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const schedules = await listMissionSchedules(orgId);
@@ -48,6 +53,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const schedule = await createMissionSchedule(orgId, {

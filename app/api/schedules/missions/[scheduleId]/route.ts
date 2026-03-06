@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deleteMissionSchedule, updateMissionSchedule } from "@/lib/schedule/mission-schedules";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: Promise<{
@@ -36,6 +37,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const updated = await updateMissionSchedule(orgId, scheduleId, {
@@ -85,6 +90,10 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const deleted = await deleteMissionSchedule(orgId, scheduleId);

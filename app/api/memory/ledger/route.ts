@@ -2,6 +2,7 @@ import { LogType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseLimit(value: string | null) {
   if (!value) {
@@ -54,6 +55,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const [logs, compliance] = await Promise.all([
@@ -139,4 +144,3 @@ export async function GET(request: NextRequest) {
     compliance
   });
 }
-

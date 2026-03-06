@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deleteStorageConnector, getStorageConnector, updateStorageConnector, type ConnectorStatus } from "@/lib/storage/org-storage";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: Promise<{
@@ -23,6 +24,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
       { ok: false, message: "orgId and connectorId are required." },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const connector = await getStorageConnector(orgId, connectorId);
@@ -57,6 +62,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const updated = await updateStorageConnector(orgId, connectorId, {
     ...(body?.name !== undefined ? { name: body.name } : {}),
@@ -90,6 +99,10 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const deleted = await deleteStorageConnector(orgId, connectorId);
   if (!deleted) {
@@ -98,4 +111,3 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
   return NextResponse.json({ ok: true });
 }
-

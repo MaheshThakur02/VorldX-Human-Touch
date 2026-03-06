@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
 import { createOrgStorageAsset, listOrgStorageAssets, type StorageProvider } from "@/lib/storage/org-storage";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 type OwnerType = "ORG" | "OWNER" | "EMPLOYEE" | "AGENT";
 
@@ -22,6 +23,10 @@ export async function GET(request: NextRequest) {
   const orgId = request.nextUrl.searchParams.get("orgId")?.trim();
   if (!orgId) {
     return NextResponse.json({ ok: false, message: "orgId query param is required." }, { status: 400 });
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const namespace = request.nextUrl.searchParams.get("namespace")?.trim();
@@ -106,6 +111,10 @@ export async function POST(request: NextRequest) {
       { ok: false, message: "orgId and name are required." },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const org = await prisma.organization.findUnique({

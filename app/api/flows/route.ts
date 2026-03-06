@@ -256,7 +256,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const access = await requireOrgAccess({ request, orgId });
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
   if (!access.ok) {
     return access.response;
   }

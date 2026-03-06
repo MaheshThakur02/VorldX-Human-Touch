@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: {
@@ -22,6 +23,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const entry = await prisma.memoryEntry.findUnique({

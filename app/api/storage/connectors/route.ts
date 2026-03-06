@@ -6,6 +6,7 @@ import {
   listStorageConnectors,
   type StorageProvider
 } from "@/lib/storage/org-storage";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseProvider(value: unknown): Exclude<StorageProvider, "MANAGED"> | null {
   if (value === "GOOGLE_DRIVE") return "GOOGLE_DRIVE";
@@ -17,6 +18,10 @@ export async function GET(request: NextRequest) {
   const orgId = request.nextUrl.searchParams.get("orgId")?.trim();
   if (!orgId) {
     return NextResponse.json({ ok: false, message: "orgId query param is required." }, { status: 400 });
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const connectors = await listStorageConnectors(orgId);
@@ -49,6 +54,10 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const org = await prisma.organization.findUnique({
     where: { id: orgId },
@@ -77,4 +86,3 @@ export async function POST(request: NextRequest) {
     { status: 201 }
   );
 }
-

@@ -2,6 +2,7 @@ import { LogType, WebhookEventType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function parseEventType(value: string | undefined): WebhookEventType | null {
   if (!value) return null;
@@ -34,6 +35,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   const webhooks = await prisma.webhook.findMany({
@@ -70,6 +75,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
   }
 
   if (!isValidHttpUrl(targetUrl)) {

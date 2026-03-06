@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { listDueMissionSchedules } from "@/lib/schedule/mission-schedules";
 import { runMissionSchedule } from "@/lib/schedule/mission-runner";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 function asBoolean(value: unknown) {
   if (typeof value === "boolean") return value;
@@ -45,6 +46,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 400 }
     );
+  }
+  const access = await requireOrgAccess({ request, orgId, allowInternal: true });
+  if (!access.ok) {
+    return access.response;
   }
 
   const dryRun = asBoolean(body?.dryRun ?? request.nextUrl.searchParams.get("dryRun"));

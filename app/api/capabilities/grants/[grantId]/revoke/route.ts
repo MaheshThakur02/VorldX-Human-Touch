@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
 import { featureFlags } from "@/lib/config/feature-flags";
+import { requireOrgAccess } from "@/lib/security/org-access";
 
 interface RouteContext {
   params: {
@@ -33,6 +34,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       { status: 400 }
     );
   }
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
 
   const grant = await prisma.capabilityGrant.findUnique({
     where: { id: grantId },
@@ -58,4 +63,3 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
   return NextResponse.json({ ok: true, grant: updated });
 }
-
