@@ -7,6 +7,7 @@ import { prisma } from "@/lib/db/prisma";
 import { requireOrgAccess } from "@/lib/security/org-access";
 import {
   canReviewPermissionRequests,
+  clearOrgPermissionRequests,
   listOrgPermissionRequests,
   type PermissionRequestStatus
 } from "@/lib/requests/permission-requests";
@@ -102,4 +103,60 @@ export async function POST(request: NextRequest) {
     },
     { status: 400 }
   );
+}
+
+export async function DELETE(request: NextRequest) {
+  const orgId = request.nextUrl.searchParams.get("orgId")?.trim() ?? "";
+  if (!orgId) {
+    return NextResponse.json(
+      {
+        ok: false,
+        message: "orgId query param is required."
+      },
+      { status: 400 }
+    );
+  }
+
+  const access = await requireOrgAccess({ request, orgId });
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const membership = await prisma.orgMember.findUnique({
+    where: {
+      userId_orgId: {
+        userId: access.actor.userId,
+        orgId
+      }
+    },
+    select: {
+      role: true
+    }
+  });
+
+  if (!canReviewPermissionRequests(membership?.role)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        message: "Only Founder/Admin can clear permission requests."
+      },
+      { status: 403 }
+    );
+  }
+
+  const clearedCount = await clearOrgPermissionRequests(orgId);
+
+  await prisma.log.create({
+    data: {
+      orgId,
+      type: LogType.USER,
+      actor: "REQUESTS",
+      message: `Permission requests cleared (${clearedCount}) by ${access.actor.email}.`
+    }
+  });
+
+  return NextResponse.json({
+    ok: true,
+    clearedCount
+  });
 }

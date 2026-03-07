@@ -21,7 +21,6 @@ import {
   LayoutDashboard,
   LayoutGrid,
   Loader2,
-  Link2,
   LogOut,
   Menu,
   Mic,
@@ -772,6 +771,7 @@ export function VorldXShell() {
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequestItem[]>([]);
   const [permissionRequestsLoading, setPermissionRequestsLoading] = useState(false);
   const [permissionRequestActionId, setPermissionRequestActionId] = useState<string | null>(null);
+  const [clearPermissionRequestsInFlight, setClearPermissionRequestsInFlight] = useState(false);
   const [canReviewPermissionRequests, setCanReviewPermissionRequests] = useState(false);
   const [signatureApprovals, setSignatureApprovals] = useState(1);
   const [isRecordingIntent, setIsRecordingIntent] = useState(false);
@@ -1204,6 +1204,7 @@ export function VorldXShell() {
     setShowRequestCenter(false);
     setPermissionRequestsLoading(false);
     setPermissionRequestActionId(null);
+    setClearPermissionRequestsInFlight(false);
     setMissionSchedules([]);
     setScheduleDraft({
       title: "",
@@ -2129,6 +2130,57 @@ export function VorldXShell() {
     },
     [loadPermissionRequests, resolvedOrg?.id]
   );
+
+  const handleClearPermissionRequests = useCallback(async () => {
+    if (!resolvedOrg?.id || clearPermissionRequestsInFlight) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Clear all permission requests for this organization? This cannot be undone."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setClearPermissionRequestsInFlight(true);
+    try {
+      const response = await fetch(
+        `/api/requests?orgId=${encodeURIComponent(resolvedOrg.id)}`,
+        {
+          method: "DELETE"
+        }
+      );
+
+      const { payload, rawText } = await parseJsonBody<{
+        ok?: boolean;
+        message?: string;
+        clearedCount?: number;
+      }>(response);
+
+      if (!response.ok || !payload?.ok) {
+        throw new Error(
+          payload?.message ??
+            (rawText
+              ? `Failed clearing requests (${response.status}): ${rawText.slice(0, 180)}`
+              : "Failed clearing requests.")
+        );
+      }
+
+      await loadPermissionRequests();
+      setControlMessage({
+        tone: "success",
+        text: `Cleared ${payload.clearedCount ?? 0} permission requests.`
+      });
+    } catch (error) {
+      setControlMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Failed clearing requests."
+      });
+    } finally {
+      setClearPermissionRequestsInFlight(false);
+    }
+  }, [clearPermissionRequestsInFlight, loadPermissionRequests, resolvedOrg?.id]);
 
   const handleCreateSchedule = useCallback(async () => {
     if (!resolvedOrg?.id) {
@@ -3638,12 +3690,24 @@ export function VorldXShell() {
                     <p className="text-xs font-medium text-slate-500">Request center</p>
                     <p className="text-xs text-slate-600">Pending {pendingPermissionRequestCount}</p>
                   </div>
-                  <button
-                    onClick={() => setShowRequestCenter(false)}
-                    className="rounded-md p-1 text-slate-500 transition hover:bg-white/10 hover:text-slate-200"
-                  >
-                    <X size={14} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {canReviewPermissionRequests && permissionRequests.length > 0 ? (
+                      <button
+                        onClick={() => void handleClearPermissionRequests()}
+                        disabled={clearPermissionRequestsInFlight}
+                        className="rounded-lg border border-red-500/35 bg-red-500/10 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:opacity-60"
+                      >
+                        {clearPermissionRequestsInFlight ? "Clearing..." : "Clear all"}
+                      </button>
+                    ) : null}
+
+                    <button
+                      onClick={() => setShowRequestCenter(false)}
+                      className="rounded-md p-1 text-slate-500 transition hover:bg-white/10 hover:text-slate-200"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
                 </div>
 
                 {permissionRequestsLoading ? (
@@ -3692,7 +3756,10 @@ export function VorldXShell() {
                               onClick={() =>
                                 void handlePermissionRequestDecision(item.id, "APPROVE")
                               }
-                              disabled={permissionRequestActionId === item.id}
+                              disabled={
+                                permissionRequestActionId === item.id ||
+                                clearPermissionRequestsInFlight
+                              }
                               className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-500/20 disabled:opacity-60"
                             >
                               {permissionRequestActionId === item.id
@@ -3703,7 +3770,10 @@ export function VorldXShell() {
                               onClick={() =>
                                 void handlePermissionRequestDecision(item.id, "REJECT")
                               }
-                              disabled={permissionRequestActionId === item.id}
+                              disabled={
+                                permissionRequestActionId === item.id ||
+                                clearPermissionRequestsInFlight
+                              }
                               className="rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:opacity-60"
                             >
                               Reject
@@ -4548,7 +4618,11 @@ function ControlDeckSurface({
     };
   }, [showAttachMenu]);
 
-  const handleOpenToolsMenuAction = useCallback(() => {
+  const handleCloseAttachMenu = useCallback(() => {
+    setShowAttachMenu(false);
+  }, []);
+
+  const handleOpenConnectorsMenuAction = useCallback(() => {
     setShowAttachMenu(false);
     onOpenTools();
   }, [onOpenTools]);
@@ -4578,7 +4652,7 @@ function ControlDeckSurface({
     <div className="relative overflow-visible rounded-[24px] border border-white/15 bg-[#02060d]/90 p-1.5 shadow-[0_24px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:rounded-[30px] sm:p-2">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_10%_15%,rgba(56,189,248,0.2),transparent_38%),radial-gradient(circle_at_88%_86%,rgba(16,185,129,0.16),transparent_34%)]" />
       <div className="relative flex items-end gap-1.5 sm:gap-2">
-        <div ref={attachMenuRef} className="relative">
+        <div ref={attachMenuRef} className="relative shrink-0 self-center">
           <button
             type="button"
             onClick={() => setShowAttachMenu((prev) => !prev)}
@@ -4599,7 +4673,7 @@ function ControlDeckSurface({
               <button
                 type="button"
                 role="menuitem"
-                onClick={handleOpenToolsMenuAction}
+                onClick={handleCloseAttachMenu}
                 className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/10"
               >
                 <span className="inline-flex items-center gap-2.5">
@@ -4611,7 +4685,7 @@ function ControlDeckSurface({
               <button
                 type="button"
                 role="menuitem"
-                onClick={handleOpenToolsMenuAction}
+                onClick={handleCloseAttachMenu}
                 className="mt-0.5 flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/10"
               >
                 <span className="inline-flex items-center gap-2.5">
@@ -4623,7 +4697,7 @@ function ControlDeckSurface({
               <button
                 type="button"
                 role="menuitem"
-                onClick={handleOpenToolsMenuAction}
+                onClick={handleCloseAttachMenu}
                 className="mt-0.5 flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/10"
               >
                 <span className="inline-flex items-center gap-2.5">
@@ -4652,7 +4726,7 @@ function ControlDeckSurface({
               <button
                 type="button"
                 role="menuitem"
-                onClick={() => setShowAttachMenu(false)}
+                onClick={handleCloseAttachMenu}
                 className="mt-0.5 flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/10"
               >
                 <span className="inline-flex items-center gap-2.5">
@@ -4665,7 +4739,7 @@ function ControlDeckSurface({
               <button
                 type="button"
                 role="menuitem"
-                onClick={handleOpenToolsMenuAction}
+                onClick={handleOpenConnectorsMenuAction}
                 className="mt-1.5 flex w-full items-center justify-between rounded-xl border border-white/10 bg-black/35 px-2.5 py-2 text-left text-sm font-semibold text-slate-100 transition hover:bg-black/45"
               >
                 <span className="inline-flex items-center gap-2.5">
@@ -4742,15 +4816,6 @@ function ControlDeckSurface({
               Direction
             </button>
           </div>
-
-          <button
-            type="button"
-            onClick={onOpenTools}
-            className="inline-flex items-center justify-center gap-2 rounded-full border border-cyan-400/35 bg-gradient-to-r from-cyan-500/15 to-emerald-500/15 px-4 py-2 text-xs font-semibold text-cyan-100 transition hover:border-cyan-300/50 hover:from-cyan-500/25 hover:to-emerald-500/25"
-          >
-            <Link2 size={14} />
-            Connect Tools
-          </button>
 
           <button
             type="button"

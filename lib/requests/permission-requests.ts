@@ -117,6 +117,24 @@ export async function listOrgPermissionRequests(
   return parsed.filter((item) => item.status === status);
 }
 
+export async function clearOrgPermissionRequests(orgId: string) {
+  const result = await prisma.memoryEntry.updateMany({
+    where: {
+      orgId,
+      tier: MemoryTier.ORG,
+      key: {
+        startsWith: REQUEST_PREFIX
+      },
+      redactedAt: null
+    },
+    data: {
+      redactedAt: new Date()
+    }
+  });
+
+  return result.count;
+}
+
 export async function createPermissionRequests(input: {
   orgId: string;
   direction: string;

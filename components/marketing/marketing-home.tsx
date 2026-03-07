@@ -102,35 +102,35 @@ export function MarketingHome() {
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(34,211,238,0.16),transparent_40%),radial-gradient(circle_at_80%_0%,rgba(16,185,129,0.14),transparent_45%),radial-gradient(circle_at_50%_100%,rgba(245,158,11,0.12),transparent_45%)]" />
       <div className="pointer-events-none absolute inset-0 opacity-[0.22] [background-image:linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:64px_64px]" />
 
-      <section className="relative mx-auto max-w-7xl px-6 pb-20 pt-8 md:px-10">
-        <header className="flex items-center justify-between">
-          <div className="inline-flex items-center gap-3">
+      <section className="relative mx-auto max-w-7xl px-4 pb-14 pt-6 sm:px-6 sm:pb-16 sm:pt-8 md:px-10 md:pb-20">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="inline-flex min-w-0 items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-400/30 bg-cyan-500/10 text-cyan-300">
               <Building2 size={19} />
             </div>
-            <div>
-              <p className="font-display text-sm font-bold uppercase tracking-[0.26em] text-cyan-200">
+            <div className="min-w-0">
+              <p className="truncate font-display text-xs font-bold uppercase tracking-[0.18em] text-cyan-200 sm:text-sm sm:tracking-[0.26em]">
                 Human Touch
               </p>
-              <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+              <p className="truncate text-[9px] uppercase tracking-[0.14em] text-slate-500 sm:text-[10px] sm:tracking-[0.2em]">
                 Organization Intelligence Platform
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
             {user ? (
               <>
                 <button
                   onClick={() => void signOutCurrentUser()}
-                  className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-300 transition hover:bg-white/10"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/20 bg-white/5 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-300 transition hover:bg-white/10 sm:w-auto sm:tracking-[0.16em]"
                 >
                   <LogOut size={12} />
                   Sign Out
                 </button>
                 <Link
                   href="/app"
-                  className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-black transition hover:bg-emerald-400"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-white px-4 py-2 text-[10px] font-bold uppercase tracking-[0.12em] text-black transition hover:bg-emerald-400 sm:w-auto sm:tracking-[0.16em]"
                 >
                   Enter App
                   <ArrowRight size={12} />
@@ -139,7 +139,7 @@ export function MarketingHome() {
             ) : (
               <a
                 href="#login"
-                className="inline-flex items-center gap-2 rounded-full border border-cyan-300/40 bg-cyan-400/10 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-100 transition hover:bg-cyan-300/15"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-cyan-300/40 bg-cyan-400/10 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-300/15 sm:w-auto sm:tracking-[0.16em]"
               >
                 Login
                 <KeyRound size={12} />
@@ -148,20 +148,20 @@ export function MarketingHome() {
           </div>
         </header>
 
-        <div className="mt-16 grid gap-10 lg:grid-cols-[1.15fr_0.85fr]">
-          <div className="space-y-8">
-            <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-400/10 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.22em] text-amber-100">
+        <div className="mt-10 grid gap-8 lg:mt-14 lg:grid-cols-[1.15fr_0.85fr] lg:gap-10">
+          <div className="space-y-6 sm:space-y-8">
+            <div className="inline-flex max-w-full flex-wrap items-center gap-2 rounded-full border border-amber-300/30 bg-amber-400/10 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-amber-100 sm:tracking-[0.22em]">
               <Sparkles size={13} />
               Talk Like You Talk To A Company
             </div>
 
             <div>
-              <h1 className="font-display text-5xl font-black uppercase leading-[0.95] tracking-tight md:text-7xl">
+              <h1 className="font-display text-[2.3rem] font-black uppercase leading-[0.95] tracking-tight sm:text-5xl md:text-7xl">
                 Direction-Based
                 <br />
                 Organization AI
               </h1>
-              <p className="mt-6 max-w-2xl text-lg text-slate-300 md:text-xl">
+              <p className="mt-5 max-w-2xl text-base text-slate-300 sm:text-lg md:mt-6 md:text-xl">
                 Your philosophy is now native: discuss with the organization, extract one
                 Direction, let the Main Agent orchestrate multi-agent execution, and keep it alive
                 through schedules, vault storage, and DNA memory built from real company data.
@@ -172,12 +172,12 @@ export function MarketingHome() {
               {PLATFORM_STEPS.map((step) => (
                 <article
                   key={step.title}
-                  className="rounded-3xl border border-white/10 bg-black/35 p-4 transition hover:border-cyan-400/40"
+                  className="rounded-3xl border border-white/10 bg-black/35 p-4 transition hover:border-cyan-400/40 sm:p-5"
                 >
                   <div className="mb-3 inline-flex rounded-2xl border border-white/10 bg-white/5 p-2 text-cyan-300">
                     <step.icon size={16} />
                   </div>
-                  <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-100">
+                  <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-100 sm:tracking-[0.2em]">
                     {step.title}
                   </h2>
                   <p className="mt-2 text-sm text-slate-400">{step.description}</p>
@@ -186,12 +186,12 @@ export function MarketingHome() {
             </div>
           </div>
 
-          <div className="space-y-4" id="login">
-            <section className="rounded-[2rem] border border-white/10 bg-black/50 p-6 backdrop-blur-md">
-              <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
+          <div className="space-y-3 sm:space-y-4" id="login">
+            <section className="rounded-[2rem] border border-white/10 bg-black/50 p-4 backdrop-blur-md sm:p-6">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500 sm:tracking-[0.24em]">
                 Test Authenticator
               </p>
-              <h2 className="mt-3 font-display text-3xl font-black uppercase tracking-tight">
+              <h2 className="mt-3 font-display text-2xl font-black uppercase tracking-tight sm:text-3xl">
                 Login To Command OS
               </h2>
               <p className="mt-2 text-sm text-slate-400">
@@ -204,12 +204,12 @@ export function MarketingHome() {
                 </div>
               ) : user ? (
                 <div className="mt-6 space-y-3 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-emerald-100">
+                  <p className="break-all text-xs text-emerald-100">
                     Signed in as {user.email}
                   </p>
                   <Link
                     href="/app"
-                    className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-black transition hover:bg-emerald-300"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-white px-4 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-black transition hover:bg-emerald-300 sm:w-auto sm:tracking-[0.14em]"
                   >
                     Enter Application
                     <ArrowRight size={12} />
@@ -245,7 +245,7 @@ export function MarketingHome() {
                     <button
                       type="submit"
                       disabled={authInFlight}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-300/35 bg-cyan-400/10 px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-300/35 bg-cyan-400/10 px-4 py-2.5 text-xs font-bold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60 sm:tracking-[0.18em]"
                     >
                       {authInFlight ? "Signing In..." : "Login With OTP"}
                     </button>
@@ -260,8 +260,10 @@ export function MarketingHome() {
               ) : null}
             </section>
 
-            <section className="rounded-[2rem] border border-white/10 bg-black/45 p-6">
-              <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Plans</p>
+            <section className="rounded-[2rem] border border-white/10 bg-black/45 p-4 sm:p-6">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500 sm:tracking-[0.24em]">
+                Plans
+              </p>
               <div className="mt-4 space-y-2">
                 {PLAN_ROWS.map((plan) => (
                   <article
@@ -269,12 +271,12 @@ export function MarketingHome() {
                     className={`rounded-2xl border border-white/10 bg-gradient-to-r p-4 ${plan.accent}`}
                   >
                     <div className="flex items-center justify-between">
-                      <p className="text-xs font-bold uppercase tracking-[0.2em] text-white">
+                      <p className="text-xs font-bold uppercase tracking-[0.12em] text-white sm:tracking-[0.2em]">
                         {plan.name}
                       </p>
                       <CheckCircle2 size={14} className="text-emerald-300" />
                     </div>
-                    <p className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-200">
+                    <p className="mt-1 text-xs uppercase tracking-[0.1em] text-slate-200 sm:tracking-[0.14em]">
                       {plan.model}
                     </p>
                     <p className="mt-2 text-sm text-slate-300">{plan.detail}</p>
@@ -283,8 +285,8 @@ export function MarketingHome() {
               </div>
             </section>
 
-            <section className="rounded-[2rem] border border-white/10 bg-black/45 p-6">
-              <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
+            <section className="rounded-[2rem] border border-white/10 bg-black/45 p-4 sm:p-6">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500 sm:tracking-[0.24em]">
                 Organizational Tools
               </p>
               <div className="mt-3 space-y-2 text-sm text-slate-300">
