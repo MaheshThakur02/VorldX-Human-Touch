@@ -215,6 +215,53 @@ function asRecord(value: unknown) {
   return value as Record<string, unknown>;
 }
 
+function isGmailSendAction(input: { toolkit: string; toolSlug: string; action: string }) {
+  const toolkit = canonicalToolkitForCompare(input.toolkit);
+  if (toolkit !== "gmail") {
+    return false;
+  }
+
+  const slug = asString(input.toolSlug).toUpperCase();
+  const action = asString(input.action).toUpperCase();
+  if (action === "SEND_EMAIL") {
+    return true;
+  }
+
+  if (!slug) {
+    return false;
+  }
+
+  return slug.includes("SEND") && slug.includes("EMAIL");
+}
+
+function sanitizeExecutionArguments(input: {
+  toolkit: string;
+  toolSlug: string;
+  action: string;
+  arguments?: Record<string, unknown>;
+}) {
+  const args = asRecord(input.arguments ?? {});
+  if (!isGmailSendAction(input)) {
+    return args;
+  }
+
+  const sanitized = { ...args };
+  for (const key of [
+    "sender_email",
+    "senderEmail",
+    "from_email",
+    "fromEmail",
+    "from_address",
+    "fromAddress",
+    "from",
+    "sender"
+  ]) {
+    delete sanitized[key];
+  }
+
+  return sanitized;
+}
+
 function normalizeToolkit(value: string) {
   return value.trim().toLowerCase();
 }
@@ -1215,6 +1262,13 @@ export class ComposioServiceCore {
       });
     }
 
+    const sanitizedArguments = sanitizeExecutionArguments({
+      toolkit,
+      toolSlug: normalizedSlug,
+      action: input.action,
+      arguments: input.arguments
+    });
+
     const client = this.createClient() as ComposioClientLike;
     let accountMissing = false;
 
@@ -1223,7 +1277,7 @@ export class ComposioServiceCore {
         const response = await client.tools.execute(normalizedSlug, {
           userId: this.composioUserId(connection.userId),
           connectedAccountId: connection.connectionId,
-          arguments: input.arguments ?? {},
+          arguments: sanitizedArguments,
           dangerouslySkipVersionCheck: true
         });
 

@@ -17,6 +17,16 @@ export type SwarmTeamType =
   | "general";
 
 export type ApprovalSensitivity = "LOW" | "MEDIUM" | "HIGH";
+export type SharedTaskPriority = "high" | "normal" | "low";
+export type SharedTaskState =
+  | "PENDING"
+  | "ASSIGNED"
+  | "ACKED"
+  | "RUNNING"
+  | "BLOCKED"
+  | "COMPLETED"
+  | "FAILED"
+  | "TIMEOUT";
 
 export interface ExistingSquadMember {
   personnelId: string;
@@ -104,11 +114,27 @@ export interface SharedKnowledgeRef {
 
 export interface PendingTask {
   taskId: string;
+  runId: string;
   role: string;
   title: string;
   description: string;
   toolHints: string[];
   requiresApproval: boolean;
+  ownerAgentId: string;
+  objective: string;
+  inputs: Array<{ ref_type: "hub_file" | "inline"; ref_id?: string; value?: unknown }>;
+  expectedOutputs: Array<{ name: string; type: "json" | "text" | "file" }>;
+  successCriteria: string[];
+  toolPlan: Array<{ toolkit: string; action: string }>;
+  approvalPolicy: { required: boolean; policyId: string };
+  retryPolicy: { maxAttempts: number; backoffSec: number };
+  timeoutSec: number;
+  priority: SharedTaskPriority;
+  state: SharedTaskState;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+  waived?: boolean;
 }
 
 export interface ToolRequest {
@@ -125,7 +151,7 @@ export interface ToolRequest {
 export interface ApprovalRequest {
   requestId: string;
   reason: string;
-  status: "PENDING" | "APPROVED" | "REJECTED";
+  status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
   checkpointId: string | null;
   metadata: Record<string, unknown>;
 }
@@ -156,6 +182,7 @@ export interface SwarmOrganizationState {
   availableToolkits: string[];
   sessionId: string;
   graphRunId: string;
+  durableRunId: string | null;
   traceId: string;
   swarmGoal: string;
   teamIntent: TeamIntent;
@@ -209,6 +236,7 @@ export function createInitialSwarmOrganizationState(input: {
     availableToolkits: [],
     sessionId: input.sessionId,
     graphRunId: input.graphRunId,
+    durableRunId: null,
     traceId: input.traceId,
     swarmGoal: "",
     teamIntent: {

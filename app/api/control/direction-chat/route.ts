@@ -12,10 +12,17 @@ import { executeAgentTool } from "@/lib/agent/tools/execute";
 import { featureFlags } from "@/lib/config/feature-flags";
 import { prisma } from "@/lib/db/prisma";
 import {
+  applyDirectionSendArgsFromActiveDraft,
+  handleDirectionDraftIntent,
   inferDirectionChatGmailIntent,
   isCapabilityOverviewRequest,
-  isSimpleGreeting
+  isSimpleGreeting,
+  listMissingDirectionSendFields
 } from "@/lib/direction/chat-routing";
+import {
+  fillDraftDetails,
+  type ActiveDraft
+} from "@/lib/agent/run/email-request-parser";
 import { ensureCompanyDataFile } from "@/lib/hub/organization-hub";
 import { maybeRunSwarmOrganizationGraph } from "@/lib/langgraph/swarm-organization-entry";
 import { isOrganizationGraphEnabledForActor } from "@/lib/langgraph/utils/feature-gating";
@@ -65,6 +72,15 @@ const DIRECTION_CHAT_MAX_OUTPUT_TOKENS = positiveEnvInt(
   420
 );
 const PERMISSION_REQUEST_KEY_PREFIX = "org.request.permission.";
+const DIRECTION_DRAFT_SESSION_TTL_MS = 1000 * 60 * 60 * 6;
+
+interface DirectionDraftSession {
+  activeDraft: ActiveDraft | null;
+  turn: number;
+  updatedAt: number;
+}
+
+const directionDraftSessions = new Map<string, DirectionDraftSession>();
 
 const GREETING_RESPONSES = [
   "Hello. I am the Organization for VorldX.io, an advanced technology platform building intelligent digital ecosystems. How may I assist you?",
@@ -90,6 +106,53 @@ function clampText(value: string, maxChars: number) {
   return `${value.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function directionDraftSessionKey(orgId: string, userId: string) {
+  return `${orgId}:${userId}`;
+}
+
+function cleanupDirectionDraftSessions(now: number) {
+  for (const [key, value] of directionDraftSessions.entries()) {
+    if (now - value.updatedAt > DIRECTION_DRAFT_SESSION_TTL_MS) {
+      directionDraftSessions.delete(key);
+    }
+  }
+}
+
+function loadDirectionDraftSession(orgId: string, userId: string) {
+  cleanupDirectionDraftSessions(Date.now());
+  const key = directionDraftSessionKey(orgId, userId);
+  const existing = directionDraftSessions.get(key);
+  if (!existing) {
+    return { activeDraft: null, turn: 0 };
+  }
+  return {
+    activeDraft: existing.activeDraft,
+    turn: existing.turn
+  };
+}
+
+function saveDirectionDraftSession(input: {
+  orgId: string;
+  userId: string;
+  activeDraft: ActiveDraft | null;
+  turn: number;
+}) {
+  const key = directionDraftSessionKey(input.orgId, input.userId);
+  directionDraftSessions.set(key, {
+    activeDraft: input.activeDraft,
+    turn: input.turn,
+    updatedAt: Date.now()
+  });
+}
+
+function looksLikeDraftDetailFillMessage(message: string) {
+  return (
+    /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(message) ||
+    /\bcompany\b|\bcorp\b|\binc\b|\bltd\b/i.test(message) ||
+    /(?:his|her|their|name)\s+is/i.test(message)
+  );
+}
+
 function summarizeGmailToolResponse(input: {
   action: string;
   data: Record<string, unknown>;
@@ -100,13 +163,37 @@ function summarizeGmailToolResponse(input: {
   if (action === "SEND_EMAIL") {
     const recipient = cleanText(data.to);
     const subject = cleanText(data.subject);
-    if (recipient && subject) {
-      return `Email sent to ${recipient} with subject "${subject}".`;
+    const messageId = cleanText(data.messageId || data.message_id);
+    const deliveryVerified = data.deliveryVerified === true || data.delivered === true;
+    const acceptedByProvider = data.acceptedByProvider === true || deliveryVerified;
+
+    if (deliveryVerified) {
+      if (recipient && subject) {
+        return messageId
+          ? `Email sent to ${recipient} with subject "${subject}" (message id: ${messageId}).`
+          : `Email sent to ${recipient} with subject "${subject}".`;
+      }
+      if (recipient) {
+        return messageId
+          ? `Email sent to ${recipient} (message id: ${messageId}).`
+          : `Email sent to ${recipient}.`;
+      }
+      return messageId
+        ? `Email sent successfully (message id: ${messageId}).`
+        : "Email sent successfully.";
     }
-    if (recipient) {
-      return `Email sent to ${recipient}.`;
+
+    if (acceptedByProvider) {
+      if (recipient && subject) {
+        return `Email submission accepted for ${recipient} with subject "${subject}", but final delivery is not yet verified. Please check Sent folder and recipient inbox.`;
+      }
+      if (recipient) {
+        return `Email submission accepted for ${recipient}, but final delivery is not yet verified. Please check Sent folder and recipient inbox.`;
+      }
+      return "Email submission was accepted, but final delivery is not yet verified. Please check Sent folder and recipient inbox.";
     }
-    return "Email sent successfully.";
+
+    return "Email send request finished with uncertain delivery state. Please verify in Sent folder before assuming it was delivered.";
   }
 
   if (action === "SUMMARIZE_EMAILS") {
@@ -139,17 +226,6 @@ function summarizeGmailToolResponse(input: {
       : `I checked Gmail and found ${count} recent email(s).`;
 
   return `${header}\n${preview.join("\n")}`;
-}
-
-function missingGmailSendFields(args: Record<string, unknown>) {
-  const to = cleanText(args.to || args.recipient_email);
-  const subject = cleanText(args.subject);
-  const body = cleanText(args.body || args.content);
-  const missing: string[] = [];
-  if (!to) missing.push("recipient email");
-  if (!subject) missing.push("subject");
-  if (!body) missing.push("body");
-  return missing;
 }
 
 function pickGreetingResponse() {
@@ -602,6 +678,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const currentDraftSession = loadDirectionDraftSession(orgId, access.actor.userId);
+    let activeDraft = currentDraftSession.activeDraft;
+    let draftTurn = currentDraftSession.turn;
+
     // Keep greeting UX deterministic and low-cost: rotate only for first-turn simple greetings.
     if (history.length === 0 && isSimpleGreeting(message)) {
       return NextResponse.json({
@@ -688,10 +768,60 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const gmailIntent = inferDirectionChatGmailIntent(message);
+    const inferredGmailIntent = inferDirectionChatGmailIntent(message);
+    const gmailIntent =
+      inferredGmailIntent ??
+      (activeDraft &&
+      /\b(send|approve|confirm|go ahead|ship it|send it)\b/i.test(message)
+        ? ({
+            action: "SEND_EMAIL",
+            arguments: {}
+          } as const)
+        : null);
     if (gmailIntent) {
+      let mergedSendArgs: Record<string, unknown> | null = null;
+      if (gmailIntent.action === "DRAFT_EMAIL") {
+        draftTurn += 1;
+        const draftHandled = handleDirectionDraftIntent({
+          message,
+          args: gmailIntent.arguments,
+          activeDraft,
+          turn: draftTurn
+        });
+        activeDraft = draftHandled.activeDraft;
+        saveDirectionDraftSession({
+          orgId,
+          userId: access.actor.userId,
+          activeDraft,
+          turn: draftTurn
+        });
+        return NextResponse.json({
+          ok: true,
+          reply: draftHandled.reply,
+          directionCandidate: "",
+          intentRouting: {
+            route: "CHAT_RESPONSE",
+            reason: "Deterministic Gmail draft intent detected.",
+            toolkitHints: ["gmail"],
+            squadRoleHints: []
+          },
+          model: {
+            provider: null,
+            name: null,
+            source: "deterministic-draft"
+          },
+          tokenUsage: null,
+          billing: null,
+          contextSelection: null
+        });
+      }
+
       if (gmailIntent.action === "SEND_EMAIL") {
-        const missing = missingGmailSendFields(gmailIntent.arguments);
+        mergedSendArgs = applyDirectionSendArgsFromActiveDraft({
+          args: gmailIntent.arguments,
+          activeDraft
+        });
+        const missing = listMissingDirectionSendFields(mergedSendArgs);
         if (missing.length > 0) {
           return NextResponse.json({
             ok: true,
@@ -720,7 +850,13 @@ export async function POST(request: NextRequest) {
         userId: access.actor.userId,
         toolkit: "gmail",
         action: gmailIntent.action,
-        arguments: gmailIntent.arguments,
+        arguments:
+          gmailIntent.action === "SEND_EMAIL"
+            ? mergedSendArgs ?? applyDirectionSendArgsFromActiveDraft({
+              args: gmailIntent.arguments,
+              activeDraft
+            })
+            : gmailIntent.arguments,
         taskId: `direction-chat-gmail-${randomUUID().slice(0, 8)}`
       });
 
@@ -753,6 +889,68 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      if (gmailIntent.action === "SEND_EMAIL" && activeDraft) {
+        mergedSendArgs = mergedSendArgs ?? applyDirectionSendArgsFromActiveDraft({
+          args: gmailIntent.arguments,
+          activeDraft
+        });
+      }
+      if (gmailIntent.action === "SEND_EMAIL") {
+        const deliveryConfirmed =
+          toolResult.data.deliveryVerified === true ||
+          toolResult.data.delivered === true;
+        mergedSendArgs = mergedSendArgs ?? applyDirectionSendArgsFromActiveDraft({
+          args: gmailIntent.arguments,
+          activeDraft
+        });
+        const snapshot = {
+          subject: cleanText(mergedSendArgs.subject),
+          body: cleanText(mergedSendArgs.body || mergedSendArgs.content),
+          to: cleanText(mergedSendArgs.to || mergedSendArgs.recipient_email) || null,
+          recipientName: activeDraft?.recipientName ?? null,
+          companyName: activeDraft?.companyName ?? null,
+          senderName: activeDraft?.senderName ?? null,
+          intentHint: activeDraft?.intentHint ?? null
+        };
+
+        draftTurn += 1;
+        if (activeDraft) {
+          activeDraft = {
+            ...activeDraft,
+            to: snapshot.to ?? activeDraft.to,
+            subject: snapshot.subject || activeDraft.subject,
+            body: snapshot.body || activeDraft.body,
+            status: deliveryConfirmed ? "sent" : "pending_approval",
+            lastSentDraft: deliveryConfirmed
+              ? snapshot
+              : activeDraft.lastSentDraft ?? null,
+            producedAtTurn: draftTurn
+          };
+        } else if (snapshot.subject || snapshot.body || snapshot.to) {
+          activeDraft = {
+            subject: snapshot.subject || "Quick note",
+            body: snapshot.body || "",
+            to: snapshot.to,
+            recipientName: snapshot.recipientName,
+            companyName: snapshot.companyName,
+            senderName: snapshot.senderName,
+            intentHint: snapshot.intentHint,
+            lastSentDraft: deliveryConfirmed ? snapshot : null,
+            status: deliveryConfirmed ? "sent" : "pending_approval",
+            producedAtTurn: draftTurn
+          };
+        }
+
+        if (activeDraft) {
+          saveDirectionDraftSession({
+            orgId,
+            userId: access.actor.userId,
+            activeDraft,
+            turn: draftTurn
+          });
+        }
+      }
+
       return NextResponse.json({
         ok: true,
         reply: summarizeGmailToolResponse({
@@ -770,6 +968,45 @@ export async function POST(request: NextRequest) {
           provider: null,
           name: null,
           source: "tool-execution"
+        },
+        tokenUsage: null,
+        billing: null,
+        contextSelection: null
+      });
+    }
+
+    if (activeDraft && activeDraft.status !== "sent" && looksLikeDraftDetailFillMessage(message)) {
+      draftTurn += 1;
+      activeDraft = fillDraftDetails(activeDraft, message);
+      saveDirectionDraftSession({
+        orgId,
+        userId: access.actor.userId,
+        activeDraft,
+        turn: draftTurn
+      });
+      return NextResponse.json({
+        ok: true,
+        reply: [
+          "Got it. I updated the existing draft with your details:",
+          "",
+          `To: ${activeDraft.to ?? "[recipient email]"}`,
+          `Subject: ${activeDraft.subject}`,
+          "",
+          activeDraft.body,
+          "",
+          'Reply "send" to send this, or tell me what to change.'
+        ].join("\n"),
+        directionCandidate: "",
+        intentRouting: {
+          route: "CHAT_RESPONSE",
+          reason: "Active draft updated with detail fill.",
+          toolkitHints: ["gmail"],
+          squadRoleHints: []
+        },
+        model: {
+          provider: null,
+          name: null,
+          source: "deterministic-draft-fill"
         },
         tokenUsage: null,
         billing: null,

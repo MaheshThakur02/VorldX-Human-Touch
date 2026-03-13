@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { ActiveDraft } from "../run/email-request-parser.ts";
+
 export type GmailPlannerIntent =
   | "send_email"
   | "summarize_emails"
@@ -55,16 +57,44 @@ function extractJsonObject(raw: string) {
 export function buildGmailPlannerPrompt(input: {
   prompt: string;
   providedInput: Record<string, unknown>;
+  activeDraft?: ActiveDraft | null;
 }) {
+  const activeDraftBlock = input.activeDraft
+    ? [
+        "ACTIVE DRAFT IN PROGRESS — DO NOT LOSE THIS:",
+        `Subject: ${input.activeDraft.subject}`,
+        `To: ${input.activeDraft.to ?? "not yet provided"}`,
+        `Recipient Name: ${input.activeDraft.recipientName ?? "not yet provided"}`,
+        `Company Name: ${input.activeDraft.companyName ?? "not yet provided"}`,
+        `Status: ${input.activeDraft.status}`,
+        "",
+        "Full draft body:",
+        `${input.activeDraft.body}`,
+        "",
+        "CRITICAL INSTRUCTION:",
+        "The user is continuing to refine or provide details for THIS draft.",
+        "Do not start a new draft.",
+        "Do not rewrite this email from scratch.",
+        "Only fill in missing fields or apply requested changes to the existing body above."
+      ].join("\n")
+    : "";
+
   const systemPrompt = [
-    "Map Gmail requests to JSON.",
+    "You are a helpful assistant for Human Touch.",
+    "CRITICAL RULE — Read intent before acting:",
+    "- If user says draft/write/compose/create, draft first. Do not ask for fields first.",
+    "- If user says send/email to/submit, require recipient and subject when missing.",
+    "- Never confuse drafting with sending.",
+    "Map the Gmail request to JSON.",
     "Return JSON only (no markdown):",
     '{"intent":"send_email|summarize_emails|search_emails|read_email|unknown","needs":[],"args":{},"requires_confirmation":false,"assistant_message":""}',
     "Rules:",
     "- Never invent recipient_email.",
     "- send_email requires_confirmation must be true.",
+    "- For draft-first requests, keep needs empty when a draft can still be produced.",
     "- If send target is missing, include recipient_email in needs.",
-    "- Keep assistant_message concise."
+    "- Keep assistant_message concise.",
+    activeDraftBlock
   ].join("\n");
 
   const userPrompt = [

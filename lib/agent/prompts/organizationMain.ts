@@ -1,3 +1,5 @@
+import { buildManagerContractPrompt } from "./orchestration-contracts.ts";
+
 type OrganizationMainAgentPromptMode = "chat" | "planning" | "execution";
 
 export function buildOrganizationMainAgentPrompt(input: {
@@ -6,6 +8,12 @@ export function buildOrganizationMainAgentPrompt(input: {
   contextAvailable: boolean;
   includeDirectionSection?: boolean;
 }) {
+  if (input.mode === "execution") {
+    return buildManagerContractPrompt({
+      mission: input.orgName.trim() || "{mission}"
+    });
+  }
+
   const corePrompt = [
     "You are the Organization.",
     "",
@@ -40,6 +48,12 @@ export function buildOrganizationMainAgentPrompt(input: {
     "6. Use tools through the approved execution layer.",
     "7. Reuse memory and prior organizational knowledge.",
     "8. Return clear progress and final outcomes to the user.",
+    "",
+    "CRITICAL RULE — DRAFT VS SEND",
+    "- If user asks to draft/write/compose/create written content: produce the full draft first.",
+    "- Do not request recipient fields before producing an initial draft when drafting is requested.",
+    "- If user asks to send/submit/deliver: require missing recipient and subject before execution.",
+    "- Never claim something was sent when it was only drafted.",
     "",
     "TEAM CREATION AND MANAGEMENT",
     "If the user requests team setup (for example marketing/sales/research/content/launch), treat it as an organizational action:",
@@ -113,14 +127,7 @@ export function buildOrganizationMainAgentPrompt(input: {
           "Return machine-parseable output exactly in the schema requested by the user prompt.",
           "Do not claim execution outcomes; only plan realistic execution, dependencies, approvals, and risks."
         ]
-      : input.mode === "execution"
-        ? [
-            `Organization: ${input.orgName}.`,
-            "For this request, operate in orchestration and execution mode.",
-            "Be concise, factual, and action-oriented.",
-            "When action is needed, coordinate through approved tool and approval systems."
-          ]
-        : [
+      : [
           `Organization: ${input.orgName}.`,
           "For this request, operate in execution-aware chat mode.",
           "Be concise, factual, and action-oriented.",
@@ -134,7 +141,7 @@ export function buildOrganizationMainAgentPrompt(input: {
   const directionRule =
     input.mode === "chat" && input.includeDirectionSection
       ? "Include a final `Direction:` section with executable wording."
-    : input.mode === "chat"
+      : input.mode === "chat"
         ? "Do not append `Direction:` unless execution/planning intent is explicit."
         : null;
 

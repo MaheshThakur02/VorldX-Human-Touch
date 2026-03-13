@@ -1,9 +1,12 @@
 export const dynamic = "force-dynamic";
 
+import { randomUUID } from "node:crypto";
+
 import {
   FlowStatus,
   LogType,
   PersonnelStatus,
+  type Prisma,
   SpendEventType,
   TaskStatus
 } from "@prisma/client";
@@ -36,6 +39,7 @@ import {
   listOrgPermissionRequests,
   type PermissionRequestRecord
 } from "@/lib/requests/permission-requests";
+import { emitOrchestrationEvent } from "@/lib/orchestration/event-log";
 import { buildInternalApiHeaders } from "@/lib/security/internal-api";
 import { requireOrgAccess } from "@/lib/security/org-access";
 
@@ -115,6 +119,10 @@ function asRecord(value: unknown) {
     return {} as Record<string, unknown>;
   }
   return value as Record<string, unknown>;
+}
+
+function toInputJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
 function normalizeTextList(value: unknown, limit: number) {
@@ -1001,6 +1009,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      const normalizedRunId = `r_${created.id}`;
       for (let index = 0; index < taskPrompts.length; index += 1) {
         const stepPrompt = taskPrompts[index];
         const specialtyHints = inferTaskSpecialtyHints(stepPrompt);
@@ -1032,8 +1041,43 @@ export async function POST(request: NextRequest) {
             : index === 0
               ? requestedToolkits
               : promptInferredToolkits;
+        const normalizedTaskId = `t_${randomUUID().slice(0, 10)}`;
+        const nowIso = new Date().toISOString();
+        const normalizedTask = {
+          task_id: normalizedTaskId,
+          run_id: normalizedRunId,
+          owner_agent_id: assignedAgent?.id ?? "unassigned-agent",
+          objective: stepPrompt,
+          inputs: [] as Array<{ ref_type: "hub_file" | "inline"; ref_id?: string; value?: unknown }>,
+          expected_outputs: [{ name: "result", type: "json" as const }],
+          success_criteria: [
+            "Output committed in Hub with sourceTaskId",
+            "At least one tool receipt verified"
+          ],
+          tool_plan:
+            taskRequestedToolkits.length > 0
+              ? taskRequestedToolkits.map((toolkit) => ({
+                  toolkit,
+                  action: "TASK_EXECUTION"
+                }))
+              : [{ toolkit: "internal", action: "GENERATE_OUTPUT" }],
+          approval_policy: {
+            required: false,
+            policy_id: "policy.default"
+          },
+          retry_policy: {
+            max_attempts: 3,
+            backoff_sec: 15
+          },
+          timeout_sec: 600,
+          priority: index === 0 ? "high" : "normal",
+          state: "PENDING",
+          attempts: 0,
+          created_at: nowIso,
+          updated_at: nowIso
+        };
         // eslint-disable-next-line no-await-in-loop
-        await tx.task.create({
+        const createdTask = await tx.task.create({
           data: {
             flowId: created.id,
             agentId: assignedAgent?.id ?? null,
@@ -1041,25 +1085,26 @@ export async function POST(request: NextRequest) {
             status: TaskStatus.QUEUED,
             requiredFiles: [],
             isPausedForInput: false,
-            executionTrace: {
+            executionTrace: toInputJsonValue({
               requestedToolkits: taskRequestedToolkits,
               initiatedByUserId,
-                orchestrator: {
-                  mode: fallbackToMainOnly ? "MAIN_AGENT_ONLY" : "MULTI_AGENT",
-                  stage: index === 0 ? "PLANNING" : "EXECUTION",
-                  stepIndex: index + 1,
-                  totalSteps: taskPrompts.length,
-                  strictPipelineMode: pipelineSettings.mode,
-                  strictRules: {
-                    requireDetailedPlan: pipelinePolicy.requireDetailedPlan,
-                    requireMultiWorkflowDecomposition:
-                      pipelinePolicy.requireMultiWorkflowDecomposition,
-                    enforceSpecialistToolAssignment:
-                      pipelinePolicy.enforceSpecialistToolAssignment
-                  },
-                  planId: planId ?? null,
-                  planLock: pipelinePolicy.freezeExecutionToApprovedPlan
-                    ? {
+              normalizedTask,
+              orchestrator: {
+                mode: fallbackToMainOnly ? "MAIN_AGENT_ONLY" : "MULTI_AGENT",
+                stage: index === 0 ? "PLANNING" : "EXECUTION",
+                stepIndex: index + 1,
+                totalSteps: taskPrompts.length,
+                strictPipelineMode: pipelineSettings.mode,
+                strictRules: {
+                  requireDetailedPlan: pipelinePolicy.requireDetailedPlan,
+                  requireMultiWorkflowDecomposition:
+                    pipelinePolicy.requireMultiWorkflowDecomposition,
+                  enforceSpecialistToolAssignment:
+                    pipelinePolicy.enforceSpecialistToolAssignment
+                },
+                planId: planId ?? null,
+                planLock: pipelinePolicy.freezeExecutionToApprovedPlan
+                  ? {
                       enabled: true,
                       planId: planId ?? null,
                       planUpdatedAt: launchPlanRecord?.updatedAt ?? null
@@ -1068,8 +1113,23 @@ export async function POST(request: NextRequest) {
                       enabled: false
                     }
               }
-            }
+            })
           }
+        });
+        // eslint-disable-next-line no-await-in-loop
+        await emitOrchestrationEvent({
+          orgId,
+          runId: created.id,
+          taskId: normalizedTaskId,
+          attempt: 1,
+          agentId: assignedAgent?.id ?? "unassigned-agent",
+          eventType: "TASK_ASSIGNED",
+          idempotencyKey: `${created.id}:${normalizedTaskId}:1:TASK_ASSIGNED`,
+          payload: {
+            dbTaskId: createdTask.id,
+            objective: stepPrompt
+          },
+          tx
         });
       }
 

@@ -124,6 +124,8 @@ test("send flow sends only after confirm=true", async () => {
   assert.equal(sendInvoked, true);
   assert.equal(response.status, "completed");
   assert.match(response.assistant_message, /Email sent/i);
+  assert.equal(response.delivery?.verified, true);
+  assert.equal(response.delivery?.acceptedByProvider, true);
 });
 
 test("send flow does not send when confirm=true but draft fields are missing", async () => {
@@ -504,6 +506,38 @@ test("explicit draft mode keeps approval flow active", async () => {
   assert.equal(sendInvoked, false);
 });
 
+test("draft-first prompt writes a draft before asking send fields", async () => {
+  const response = await runAgentEngine(
+    {
+      prompt: "draft a mail for me congratulating my friend for his new job",
+      confirm: false
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner unavailable");
+      },
+      writeEmail: async () => {
+        throw new Error("Writer unavailable");
+      },
+      executeGmailAction: async () => ({
+        ok: true,
+        toolkit: "gmail",
+        action: "SEND_EMAIL",
+        toolSlug: "GMAIL_SEND_EMAIL",
+        data: {},
+        logId: null,
+        attempts: 1
+      })
+    }
+  );
+
+  assert.equal(response.status, "needs_confirmation");
+  assert.equal(response.required_inputs, undefined);
+  assert.equal(response.draft?.to, "[recipient email]");
+  assert.equal(Boolean(response.draft?.subject), true);
+  assert.equal(Boolean(response.draft?.body), true);
+});
+
 test("approval mode keeps boilerplate out of sent payload", async () => {
   let capturedSendArgs: Record<string, unknown> | null = null;
   const response = await runAgentEngine(
@@ -587,4 +621,231 @@ test("direct send mode bypasses approval and sends structured payload", async ()
   assert.equal((capturedSendArgs?.["to"] as string | undefined) ?? "", "x@example.com");
   assert.equal((capturedSendArgs?.["subject"] as string | undefined) ?? "", "Hello");
   assert.equal((capturedSendArgs?.["body"] as string | undefined) ?? "", "Test message");
+});
+
+test("detail-fill message updates active draft without planner rewrite", async () => {
+  const activeDraft = {
+    subject: "Congratulations on Your Promotion",
+    body: [
+      "Hi [Recipient's Name],",
+      "",
+      "Congratulations on your promotion to CEO at [Company Name].",
+      "",
+      "Best regards,"
+    ].join("\n"),
+    to: null,
+    recipientName: null,
+    companyName: null,
+    status: "pending_approval" as const,
+    producedAtTurn: 1
+  };
+
+  const response = await runAgentEngine(
+    {
+      prompt: "his email is mp6590648@bbdu.ac.in company is VorldX",
+      activeDraft,
+      turn: 2
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner should not run for detail-fill");
+      },
+      writeEmail: async () => {
+        throw new Error("Writer should not run for detail-fill");
+      },
+      executeGmailAction: async () => ({
+        ok: true,
+        toolkit: "gmail",
+        action: "SEND_EMAIL",
+        toolSlug: "GMAIL_SEND_EMAIL",
+        data: {},
+        logId: null,
+        attempts: 1
+      })
+    }
+  );
+
+  assert.equal(response.status, "needs_confirmation");
+  assert.equal(response.activeDraft?.to, "mp6590648@bbdu.ac.in");
+  assert.equal(Boolean(response.activeDraft?.body.includes("VorldX")), true);
+});
+
+test("send it uses stored active draft content", async () => {
+  let capturedSendArgs: Record<string, unknown> | null = null;
+  const response = await runAgentEngine(
+    {
+      prompt: "send it",
+      confirm: true,
+      activeDraft: {
+        subject: "Congratulations on the New Role",
+        body: "Hi Sam,\n\nCongratulations on your new role at VorldX.\n\nBest regards,",
+        to: "sam@example.com",
+        recipientName: "Sam",
+        companyName: "VorldX",
+        status: "pending_approval",
+        producedAtTurn: 3
+      },
+      turn: 4
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner unavailable");
+      },
+      writeEmail: async () => ({
+        subject: "unused",
+        body: "unused"
+      }),
+      executeGmailAction: async ({ arguments: args }) => {
+        capturedSendArgs = args;
+        return {
+          ok: true,
+          toolkit: "gmail",
+          action: "SEND_EMAIL",
+          toolSlug: "GMAIL_SEND_EMAIL",
+          data: {},
+          logId: null,
+          attempts: 1
+        };
+      }
+    }
+  );
+
+  assert.equal(response.status, "completed");
+  assert.equal((capturedSendArgs?.["to"] as string | undefined) ?? "", "sam@example.com");
+  assert.equal(
+    (capturedSendArgs?.["body"] as string | undefined) ?? "",
+    "Hi Sam,\n\nCongratulations on your new role at VorldX.\n\nBest regards,"
+  );
+});
+
+test("birthday draft intent never uses raw command text as body", async () => {
+  const response = await runAgentEngine(
+    {
+      prompt: "draft a birthday wish email to rahul",
+      confirm: false
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner unavailable");
+      },
+      writeEmail: async () => {
+        throw new Error("Writer unavailable");
+      },
+      executeGmailAction: async () => ({
+        ok: true,
+        toolkit: "gmail",
+        action: "SEND_EMAIL",
+        toolSlug: "GMAIL_SEND_EMAIL",
+        data: {},
+        logId: null,
+        attempts: 1
+      })
+    }
+  );
+
+  assert.equal(response.status, "needs_confirmation");
+  assert.equal(response.activeDraft?.recipientName, "Rahul");
+  assert.match((response.draft?.subject ?? "").toLowerCase(), /birthday/);
+  assert.match((response.draft?.body ?? "").toLowerCase(), /happy birthday|wishing you/);
+  assert.equal((response.draft?.body ?? "").toLowerCase().includes("draft a birthday wish"), false);
+});
+
+test("resend request uses last sent draft snapshot instead of current broken draft", async () => {
+  let capturedSendArgs: Record<string, unknown> | null = null;
+  const response = await runAgentEngine(
+    {
+      prompt: "resend that email",
+      confirm: true,
+      activeDraft: {
+        subject: "Broken draft subject",
+        body: "Broken draft body",
+        to: "wrong@example.com",
+        recipientName: "Wrong",
+        companyName: null,
+        senderName: null,
+        intentHint: "generic_note",
+        lastSentDraft: {
+          subject: "Happy Birthday, Rahul!",
+          body: "Hi Rahul,\n\nWishing you a very happy birthday!\n\nBest regards,",
+          to: "rahul@example.com",
+          recipientName: "Rahul",
+          companyName: null,
+          senderName: null,
+          intentHint: "birthday_wish"
+        },
+        status: "sent",
+        producedAtTurn: 2
+      }
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner unavailable");
+      },
+      writeEmail: async () => {
+        throw new Error("Writer unavailable");
+      },
+      executeGmailAction: async ({ arguments: args }) => {
+        capturedSendArgs = args;
+        return {
+          ok: true,
+          toolkit: "gmail",
+          action: "SEND_EMAIL",
+          toolSlug: "GMAIL_SEND_EMAIL",
+          data: { acceptedByProvider: true },
+          logId: null,
+          attempts: 1
+        };
+      }
+    }
+  );
+
+  assert.equal(response.status, "completed");
+  assert.equal((capturedSendArgs?.["to"] as string | undefined) ?? "", "rahul@example.com");
+  assert.equal((capturedSendArgs?.["subject"] as string | undefined) ?? "", "Happy Birthday, Rahul!");
+  assert.equal(
+    (capturedSendArgs?.["body"] as string | undefined) ?? "",
+    "Hi Rahul,\n\nWishing you a very happy birthday!\n\nBest regards,"
+  );
+});
+
+test("regenerate draft ignores broken previous body and creates fresh template", async () => {
+  const response = await runAgentEngine(
+    {
+      prompt: "that draft was wrong, regenerate the birthday email",
+      confirm: false,
+      activeDraft: {
+        subject: "Wrong subject",
+        body: "RAW BUGGY BODY: draft a birthday wish email to rahul",
+        to: "rahul@example.com",
+        recipientName: "Rahul",
+        companyName: null,
+        senderName: null,
+        intentHint: "birthday_wish",
+        status: "pending_approval",
+        producedAtTurn: 1
+      },
+      turn: 2
+    },
+    {
+      plan: async () => {
+        throw new Error("Planner should not run for regenerate path");
+      },
+      writeEmail: async () => {
+        throw new Error("Writer should not run for regenerate path");
+      },
+      executeGmailAction: async () => ({
+        ok: true,
+        toolkit: "gmail",
+        action: "SEND_EMAIL",
+        toolSlug: "GMAIL_SEND_EMAIL",
+        data: {},
+        logId: null,
+        attempts: 1
+      })
+    }
+  );
+
+  assert.equal(response.status, "needs_confirmation");
+  assert.equal((response.draft?.body ?? "").includes("RAW BUGGY BODY"), false);
+  assert.match((response.draft?.body ?? "").toLowerCase(), /happy birthday|wishing you/);
 });

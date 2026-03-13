@@ -69,6 +69,8 @@ import { readLocalUploadByUrl, toPreviewText } from "@/lib/hub/storage";
 import { getToolsForAgent, inferRequestedToolkits } from "@/lib/integrations/composio/service";
 import { publishRealtimeEvent } from "@/lib/realtime/publish";
 import { createJoltProofStub } from "@/lib/security/crypto";
+import { emitOrchestrationEvent } from "@/lib/orchestration/event-log";
+import { runTaskTimeoutWatchdog, touchTaskHeartbeat } from "@/lib/orchestration/watchdog";
 import {
   buildInternalApiHeaders,
   hasValidInternalApiKey,
@@ -952,10 +954,13 @@ function normalizeToolDataForModelContext(input: {
 
   if (toolkit === "gmail") {
     if (action === "SEND_EMAIL") {
+      const deliveryVerified = data.deliveryVerified === true || data.delivered === true;
       return {
         to: asString(data.to),
         subject: truncateText(asString(data.subject), 120),
-        delivered: data.delivered === true
+        acceptedByProvider: data.acceptedByProvider === true || deliveryVerified,
+        delivered: deliveryVerified,
+        messageId: asString(data.messageId) || asString(data.message_id)
       };
     }
     if (action === "READ_EMAIL") {
@@ -1040,7 +1045,21 @@ function buildDeterministicToolSummary(input: {
 
   if (toolkit === "gmail" && action === "SEND_EMAIL") {
     const recipient = asString(data.to);
-    return recipient ? `Confirmation email sent to ${recipient}.` : "Confirmation email sent.";
+    const deliveryVerified = data.deliveryVerified === true || data.delivered === true;
+    const acceptedByProvider = data.acceptedByProvider === true || deliveryVerified;
+    if (deliveryVerified) {
+      return recipient
+        ? `Confirmation email sent to ${recipient}.`
+        : "Confirmation email sent.";
+    }
+    if (acceptedByProvider) {
+      return recipient
+        ? `Confirmation email submission accepted for ${recipient}, but delivery is not yet verified.`
+        : "Confirmation email submission accepted, but delivery is not yet verified.";
+    }
+    return recipient
+      ? `Confirmation email send state is uncertain for ${recipient}; verify in Sent folder.`
+      : "Confirmation email send state is uncertain; verify in Sent folder.";
   }
 
   if (toolkit === "gmail") {
@@ -2248,6 +2267,12 @@ async function dispatchQueuedTasksForFlow(input: {
   let dispatched = 0;
 
   while (true) {
+    // Enforce SLA for stalled RUNNING tasks before dispatching additional work.
+    // eslint-disable-next-line no-await-in-loop
+    await runTaskTimeoutWatchdog({
+      orgId: input.orgId
+    });
+
     const flow = await prisma.flow.findUnique({
       where: { id: input.flowId },
       select: {
@@ -2354,6 +2379,33 @@ async function executeTaskById(
         reason: "Task execution already claimed by another worker."
       };
     }
+    const traceRecord = asRecord(task.executionTrace);
+    const normalizedTask = asRecord(traceRecord.normalizedTask);
+    const emittedTaskId =
+      typeof normalizedTask.task_id === "string" && normalizedTask.task_id.trim().length > 0
+        ? normalizedTask.task_id
+        : task.id;
+    const runId = task.flowId;
+    const agentId = task.agentId ?? "unassigned-agent";
+    await emitOrchestrationEvent({
+      orgId,
+      runId,
+      taskId: emittedTaskId,
+      attempt: 1,
+      agentId,
+      eventType: "TASK_STARTED",
+      idempotencyKey: `${runId}:${emittedTaskId}:1:TASK_STARTED`,
+      payload: {
+        dbTaskId: task.id
+      }
+    });
+    await touchTaskHeartbeat({
+      orgId,
+      runId,
+      taskId: emittedTaskId,
+      agentId,
+      attempt: 1
+    });
   }
 
   let agent = task.agent;
@@ -4869,6 +4921,25 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
       }
     });
 
+    const pausedTrace = asRecord(task.executionTrace);
+    const normalizedTask = asRecord(pausedTrace.normalizedTask);
+    const emittedTaskId =
+      typeof normalizedTask.task_id === "string" && normalizedTask.task_id.trim().length > 0
+        ? normalizedTask.task_id
+        : task.id;
+    await emitOrchestrationEvent({
+      orgId,
+      runId: task.flowId,
+      taskId: emittedTaskId,
+      attempt: 1,
+      agentId: logicalAgentId || task.agentId || "unassigned-agent",
+      eventType: "TASK_BLOCKED",
+      idempotencyKey: `${task.flowId}:${emittedTaskId}:1:TASK_BLOCKED`,
+      payload: {
+        reason
+      }
+    });
+
     return { ok: true, ...(integrationError ? { integrationError } : {}) };
   }
 
@@ -4982,6 +5053,31 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
         flowId: task.flowId,
         status: FlowStatus.ACTIVE
       }
+    });
+
+    const normalizedTask = asRecord(asRecord(task.executionTrace).normalizedTask);
+    const emittedTaskId =
+      typeof normalizedTask.task_id === "string" && normalizedTask.task_id.trim().length > 0
+        ? normalizedTask.task_id
+        : task.id;
+    await emitOrchestrationEvent({
+      orgId,
+      runId: task.flowId,
+      taskId: emittedTaskId,
+      attempt: 1,
+      agentId: resumedAgentId || task.agentId || "unassigned-agent",
+      eventType: "TASK_ACKED",
+      idempotencyKey: `${task.flowId}:${emittedTaskId}:1:TASK_ACKED`,
+      payload: {
+        resumed: true
+      }
+    });
+    await touchTaskHeartbeat({
+      orgId,
+      runId: task.flowId,
+      taskId: emittedTaskId,
+      agentId: resumedAgentId || task.agentId || "unassigned-agent",
+      attempt: 1
     });
 
     const executionResult = await executeTaskById(
@@ -5171,6 +5267,25 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
       }
     });
 
+    const completedTrace = executionTrace ? asRecord(executionTrace) : asRecord(task.executionTrace);
+    const normalizedTask = asRecord(completedTrace.normalizedTask);
+    const emittedTaskId =
+      typeof normalizedTask.task_id === "string" && normalizedTask.task_id.trim().length > 0
+        ? normalizedTask.task_id
+        : task.id;
+    await emitOrchestrationEvent({
+      orgId,
+      runId: task.flowId,
+      taskId: emittedTaskId,
+      attempt: 1,
+      agentId: logicalAgentId || task.agentId || "unassigned-agent",
+      eventType: "TASK_COMPLETED",
+      idempotencyKey: `${task.flowId}:${emittedTaskId}:1:TASK_COMPLETED`,
+      payload: {
+        verifiableProof: Boolean(verifiableProof)
+      }
+    });
+
     return { ok: true };
   }
 
@@ -5287,6 +5402,25 @@ async function handleEvent(event: InboundEvent, origin?: string): Promise<EventH
       payload: {
         flowId: task.flowId,
         status: FlowStatus.FAILED
+      }
+    });
+
+    const failedTrace = executionTrace ? asRecord(executionTrace) : asRecord(task.executionTrace);
+    const normalizedTask = asRecord(failedTrace.normalizedTask);
+    const emittedTaskId =
+      typeof normalizedTask.task_id === "string" && normalizedTask.task_id.trim().length > 0
+        ? normalizedTask.task_id
+        : task.id;
+    await emitOrchestrationEvent({
+      orgId,
+      runId: task.flowId,
+      taskId: emittedTaskId,
+      attempt: 1,
+      agentId: logicalAgentId || task.agentId || "unassigned-agent",
+      eventType: "TASK_FAILED",
+      idempotencyKey: `${task.flowId}:${emittedTaskId}:1:TASK_FAILED`,
+      payload: {
+        error
       }
     });
 

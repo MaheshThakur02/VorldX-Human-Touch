@@ -5,6 +5,10 @@ import { randomUUID } from "node:crypto";
 import { createDefaultOrganizationGraphAdapters } from "@/lib/langgraph/adapters/default/create-default-adapters";
 import { SwarmOrganizationGraph } from "@/lib/langgraph/swarm-organization-graph";
 import { isOrganizationGraphEnabledForActor } from "@/lib/langgraph/utils/feature-gating";
+import {
+  classifyRequestType,
+  isTeamOrchestrationRequest
+} from "@/lib/langgraph/utils/request-classifier";
 import { featureFlags } from "@/lib/config/feature-flags";
 
 export async function maybeRunSwarmOrganizationGraph(input: {
@@ -13,6 +17,21 @@ export async function maybeRunSwarmOrganizationGraph(input: {
   sessionId: string;
   userRequest: string;
 }) {
+  const requestType = classifyRequestType(input.userRequest);
+  if (!isTeamOrchestrationRequest(requestType)) {
+    return {
+      handled: false,
+      reply: "",
+      reason: `LangGraph skipped for ${requestType}.`,
+      graphRunId: "",
+      requestType,
+      warnings: [],
+      createdAgentCount: 0,
+      reusedAgentCount: 0,
+      approvalPendingCount: 0
+    };
+  }
+
   const enabled = isOrganizationGraphEnabledForActor({
     featureEnabled: featureFlags.langgraphOrganizationTeams,
     orgAllowlist: featureFlags.langgraphOrganizationOrgAllowlist,
@@ -20,20 +39,6 @@ export async function maybeRunSwarmOrganizationGraph(input: {
     orgId: input.orgId,
     userId: input.userId
   });
-
-  if (!enabled) {
-    return {
-      handled: false,
-      reply: "",
-      reason: "LangGraph organization feature not enabled for actor.",
-      graphRunId: "",
-      requestType: "NORMAL_SWARM_REQUEST",
-      warnings: [],
-      createdAgentCount: 0,
-      reusedAgentCount: 0,
-      approvalPendingCount: 0
-    };
-  }
 
   const graph = new SwarmOrganizationGraph({
     adapters: createDefaultOrganizationGraphAdapters()

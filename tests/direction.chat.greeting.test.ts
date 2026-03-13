@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyDirectionSendArgsFromActiveDraft,
+  handleDirectionDraftIntent,
   inferDirectionChatGmailIntent,
   isCapabilityOverviewRequest,
   isSimpleGreeting
@@ -62,4 +64,96 @@ test("preserves gmail send intent even when details are incomplete", () => {
   assert.equal(inferred?.arguments.to, "jane@example.com");
   assert.equal(inferred?.arguments.subject, undefined);
   assert.equal(inferred?.arguments.body, undefined);
+});
+
+test("routes draft wording to deterministic draft intent (not send)", () => {
+  const inferred = inferDirectionChatGmailIntent(
+    "draft a mail for congratulating my brother for his new role"
+  );
+  assert.ok(inferred);
+  assert.equal(inferred?.action, "DRAFT_EMAIL");
+});
+
+test("direction draft handler persists an active draft payload", () => {
+  const handled = handleDirectionDraftIntent({
+    message: "draft an email congratulating my brother for his promotion",
+    args: {},
+    activeDraft: null,
+    turn: 1
+  });
+
+  assert.equal(Boolean(handled.reply.includes("Here is a draft for your email:")), true);
+  assert.equal(handled.activeDraft.status, "pending_approval");
+  assert.equal(Boolean(handled.activeDraft.subject), true);
+  assert.equal(Boolean(handled.activeDraft.body), true);
+});
+
+test("draft birthday intent generates contextual body and extracts recipient name", () => {
+  const handled = handleDirectionDraftIntent({
+    message: "draft a birthday wish email to rahul",
+    args: {},
+    activeDraft: null,
+    turn: 1
+  });
+
+  assert.equal(handled.activeDraft.recipientName, "Rahul");
+  assert.match(handled.activeDraft.subject.toLowerCase(), /birthday/);
+  assert.match(handled.activeDraft.body.toLowerCase(), /wishing you a very happy birthday|happy birthday/);
+  assert.equal(handled.activeDraft.body.toLowerCase().includes("draft a birthday wish email"), false);
+});
+
+test("direction send args reuse stored active draft when message lacks fields", () => {
+  const merged = applyDirectionSendArgsFromActiveDraft({
+    args: {},
+    activeDraft: {
+      subject: "Congrats on Your Promotion",
+      body: "Hi Sam,\n\nCongratulations!\n\nBest regards,",
+      to: "sam@example.com",
+      recipientName: "Sam",
+      companyName: "VorldX",
+      status: "pending_approval",
+      producedAtTurn: 1
+    }
+  });
+
+  assert.equal(merged.to, "sam@example.com");
+  assert.equal(merged.subject, "Congrats on Your Promotion");
+  assert.equal(merged.body, "Hi Sam,\n\nCongratulations!\n\nBest regards,");
+});
+
+test("resend intent routes to send action even without mailbox keywords", () => {
+  const inferred = inferDirectionChatGmailIntent("resend that email");
+  assert.ok(inferred);
+  assert.equal(inferred?.action, "SEND_EMAIL");
+  assert.equal(inferred?.arguments.resend, true);
+});
+
+test("resend send args prefer last sent snapshot over current broken draft", () => {
+  const merged = applyDirectionSendArgsFromActiveDraft({
+    args: { resend: true },
+    activeDraft: {
+      subject: "Broken subject",
+      body: "Broken body",
+      to: "wrong@example.com",
+      recipientName: "Wrong",
+      companyName: null,
+      senderName: null,
+      intentHint: "generic_note",
+      lastSentDraft: {
+        subject: "Happy Birthday, Rahul!",
+        body: "Hi Rahul,\n\nWishing you a very happy birthday!\n\nBest regards,",
+        to: "rahul@example.com",
+        recipientName: "Rahul",
+        companyName: null,
+        senderName: null,
+        intentHint: "birthday_wish"
+      },
+      status: "sent",
+      producedAtTurn: 2
+    }
+  });
+
+  assert.equal(merged.to, "rahul@example.com");
+  assert.equal(merged.subject, "Happy Birthday, Rahul!");
+  assert.equal(merged.body, "Hi Rahul,\n\nWishing you a very happy birthday!\n\nBest regards,");
 });

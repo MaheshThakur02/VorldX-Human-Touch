@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { listDueMissionSchedules } from "@/lib/schedule/mission-schedules";
 import { runMissionSchedule } from "@/lib/schedule/mission-runner";
+import { runTaskTimeoutWatchdog } from "@/lib/orchestration/watchdog";
 import { requireOrgAccess } from "@/lib/security/org-access";
 
 function asBoolean(value: unknown) {
@@ -62,6 +63,10 @@ export async function POST(request: NextRequest) {
     100
   );
   const now = new Date();
+  const watchdog = await runTaskTimeoutWatchdog({
+    orgId,
+    now
+  });
   const dueSchedules = await listDueMissionSchedules(orgId, now);
   const queue = dueSchedules
     .sort((a, b) => new Date(a.nextRunAt).getTime() - new Date(b.nextRunAt).getTime())
@@ -119,6 +124,7 @@ export async function POST(request: NextRequest) {
     ok: true,
     orgId,
     now: now.toISOString(),
+    watchdog,
     dueCount: dueSchedules.length,
     queuedCount: queue.length,
     launchedCount: launched.length,

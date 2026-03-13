@@ -19,7 +19,6 @@ import {
   createInitialSwarmOrganizationState,
   type SwarmOrganizationState
 } from "./state.ts";
-import { isTeamOrchestrationRequest } from "./utils/request-classifier.ts";
 
 let langGraphPackageState: "unknown" | "present" | "missing" = "unknown";
 
@@ -115,32 +114,10 @@ export class SwarmOrganizationGraph {
       if (!state.featureFlagEnabled) {
         state = {
           ...state,
-          fallbackToLegacySwarmPath: true,
           warnings: [
             ...state.warnings,
-            "Feature flag disabled. Routing request to legacy Swarm path."
+            "LangGraph feature flag is disabled, but unified durable routing remains active."
           ]
-        };
-      }
-
-      if (!isTeamOrchestrationRequest(state.requestType)) {
-        state = {
-          ...state,
-          fallbackToLegacySwarmPath: true
-        };
-      }
-
-      if (state.fallbackToLegacySwarmPath) {
-        return {
-          handled: false,
-          reply: "",
-          reason: "Request should continue through legacy Swarm path.",
-          graphRunId: state.graphRunId,
-          requestType: state.requestType,
-          warnings: state.warnings,
-          createdAgentCount: 0,
-          reusedAgentCount: 0,
-          approvalPendingCount: 0
         };
       }
 
@@ -167,27 +144,12 @@ export class SwarmOrganizationGraph {
       );
       state = await this.runStage(state, "respond_as_swarm", (current) => respondAsSwarmNode(current));
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown LangGraph execution error.";
       state = {
         ...state,
-        errors: [
-          ...state.errors,
-          error instanceof Error ? error.message : "Unknown LangGraph execution error."
-        ],
-        fallbackToLegacySwarmPath: true
-      };
-    }
-
-    if (state.fallbackToLegacySwarmPath) {
-      return {
-        handled: false,
-        reply: "",
-        reason: "LangGraph run failed. Fallback requested.",
-        graphRunId: state.graphRunId,
-        requestType: state.requestType,
-        warnings: [...state.warnings, ...state.errors],
-        createdAgentCount: 0,
-        reusedAgentCount: 0,
-        approvalPendingCount: 0
+        errors: [...state.errors, message],
+        finalUserResponse: `Orchestration run failed: ${message}`
       };
     }
 
@@ -200,10 +162,13 @@ export class SwarmOrganizationGraph {
     return {
       handled: true,
       reply: state.finalUserResponse,
-      reason: "Handled by LangGraph organization path.",
+      reason:
+        state.errors.length > 0
+          ? "Handled by LangGraph organization path with orchestration errors."
+          : "Handled by LangGraph organization path.",
       graphRunId: state.graphRunId,
       requestType: state.requestType,
-      warnings: state.warnings,
+      warnings: [...state.warnings, ...state.errors],
       createdAgentCount,
       reusedAgentCount,
       approvalPendingCount

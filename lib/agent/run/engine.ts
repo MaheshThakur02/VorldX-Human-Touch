@@ -1,10 +1,33 @@
 import type { ExecuteAgentToolResult } from "../tools/execute.ts";
 import type { GmailPlannerOutput } from "../prompts/gmailPlanner.ts";
 import {
+  type DraftSnapshot,
+  fillDraftDetails,
+  parseDraftFromResponse,
   parseStructuredSendFields,
   sanitizeEmailBody,
   sanitizeEmailSubject
 } from "./email-request-parser.ts";
+import {
+  generateIntentEmailDraft,
+  inferRecipientNameFromMessage,
+  inferSenderNameFromMessage,
+  isDraftRegenerationRequest,
+  isResendRequestMessage
+} from "./draft-intent.ts";
+
+export interface ActiveDraft {
+  subject: string;
+  body: string;
+  to: string | null;
+  recipientName: string | null;
+  companyName: string | null;
+  senderName?: string | null;
+  intentHint?: string | null;
+  lastSentDraft?: DraftSnapshot | null;
+  status: "draft" | "pending_approval" | "sent";
+  producedAtTurn: number;
+}
 
 export interface AgentRunResponse {
   status: "needs_input" | "needs_confirmation" | "completed" | "error";
@@ -29,24 +52,35 @@ export interface AgentRunResponse {
     message: string;
     details?: Record<string, unknown>;
   };
+  delivery?: {
+    acceptedByProvider: boolean;
+    verified: boolean;
+    messageId?: string | null;
+    providerStatus?: string | null;
+  };
+  activeDraft?: ActiveDraft | null;
 }
 
 export interface AgentRunEngineInput {
   prompt: string;
   input?: Record<string, unknown>;
   confirm?: boolean;
+  activeDraft?: ActiveDraft | null;
+  turn?: number;
 }
 
 interface EngineDependencies {
   plan: (input: {
     prompt: string;
     providedInput: Record<string, unknown>;
+    activeDraft?: ActiveDraft | null;
   }) => Promise<GmailPlannerOutput>;
   writeEmail: (input: {
     prompt: string;
     recipientEmail: string;
     recipientName?: string;
     extraContext?: string;
+    activeDraft?: ActiveDraft | null;
   }) => Promise<{
     subject: string;
     body: string;
@@ -111,11 +145,72 @@ function isLikelyGmailPrompt(prompt: string, providedInput: Record<string, unkno
   return signalFields.some((field) => Object.prototype.hasOwnProperty.call(providedInput, field));
 }
 
-function extractMeetingLink(prompt: string) {
-  const match = prompt.match(
-    /https?:\/\/(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|calendar\.google\.com)\/[^\s)]+/i
+function isDetailFillMessage(userMessage: string, activeDraft: ActiveDraft | null) {
+  if (!activeDraft) return false;
+  if (activeDraft.status === "sent") return false;
+
+  const emailPattern = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+  const companyPattern = /company|corp|inc|ltd/i;
+  const namePattern = /(?:his|her|their|name)\s+is/i;
+
+  return (
+    emailPattern.test(userMessage) ||
+    companyPattern.test(userMessage) ||
+    namePattern.test(userMessage)
   );
-  return match?.[0]?.trim() || "";
+}
+
+function buildDraftPreviewForParsing(draft: ActiveDraft) {
+  return [
+    `To: ${draft.to ?? "[Email not yet provided]"}`,
+    `Subject: ${draft.subject}`,
+    "",
+    draft.body
+  ].join("\n");
+}
+
+function buildDraftConfirmation(draft: ActiveDraft): string {
+  return [
+    "Got it! Here is the updated draft with your details filled in:",
+    "",
+    "─────────────────────────────────────",
+    `To: ${draft.to ?? "[Email not yet provided]"}`,
+    `Subject: ${draft.subject}`,
+    "─────────────────────────────────────",
+    "",
+    draft.body,
+    "",
+    "─────────────────────────────────────",
+    "",
+    'Reply "send" to send this, or let me know if',
+    "you would like any changes before sending."
+  ].join("\n");
+}
+
+function applyDeterministicDraftRefinement(draft: ActiveDraft, userMessage: string) {
+  const updated: ActiveDraft = { ...draft };
+  const normalized = userMessage.toLowerCase();
+  const addLonger =
+    /\b(longer|more detail|more details|expand|elaborate|add more)\b/.test(normalized);
+  const makePersonal = /\b(personal|warmer|heartfelt|emotional|friendlier)\b/.test(normalized);
+
+  if (addLonger) {
+    const extraParagraph = makePersonal
+      ? "I have seen your dedication up close, and this milestone reflects all the effort and character you bring every day."
+      : "This achievement reflects consistent hard work, leadership, and the trust you have built over time.";
+    if (!updated.body.includes(extraParagraph)) {
+      updated.body = `${updated.body}\n\n${extraParagraph}`;
+    }
+  } else if (makePersonal) {
+    const personalLine = updated.recipientName
+      ? `I am genuinely happy for you, ${updated.recipientName}, and I am proud of this milestone.`
+      : "I am genuinely happy for you and proud of this milestone.";
+    if (!updated.body.includes(personalLine)) {
+      updated.body = `${updated.body}\n\n${personalLine}`;
+    }
+  }
+
+  return updated;
 }
 
 function pickEmailFromPrompt(prompt: string) {
@@ -142,29 +237,19 @@ function extractFromHint(prompt: string) {
   return match?.[1]?.trim() || "";
 }
 
-function summarizePromptForDraftBody(prompt: string) {
-  const compact = prompt.replace(/\s+/g, " ").trim();
-  if (!compact) return "";
-  const stripped = compact
-    .replace(/^(?:please\s+|kindly\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|cn\s*u\s+)+/i, "")
-    .replace(/\b(send|compose|draft|write)\b/i, "")
-    .replace(/\b(?:an?\s+)?(?:gmail\s+)?(?:email|mail)\b/i, "")
-    .replace(/\bto\s+[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i, "")
-    .replace(/\bsubject\s*[:\-][\s\S]*$/i, "")
-    .replace(/\b(?:body|message|content)\s*[:\-][\s\S]*$/i, "")
-    .replace(/^[\s,:;\-]+/, "")
-    .trim();
-  if (!stripped) return "";
-  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
-}
-
 function inferPlannerFallback(
   prompt: string,
-  providedInput: Record<string, unknown>
+  providedInput: Record<string, unknown>,
+  activeDraft: ActiveDraft | null
 ): GmailPlannerOutput {
   const args: Record<string, unknown> = { ...providedInput };
   const needs = new Set<string>();
   const structuredSend = parseStructuredSendFields(prompt);
+  const resendRequest = isResendRequestMessage(prompt);
+  const draftSource =
+    resendRequest && activeDraft?.lastSentDraft
+      ? activeDraft.lastSentDraft
+      : activeDraft;
 
   const inferredRecipient =
     asText(providedInput.recipient_email) ||
@@ -182,6 +267,21 @@ function inferPlannerFallback(
   const inferredBody = asText(providedInput.body) || structuredSend.body;
   if (inferredBody) {
     args.body = inferredBody;
+  }
+  const inferredRecipientName =
+    asText(providedInput.recipient_name) ||
+    asText(providedInput.name) ||
+    inferRecipientNameFromMessage(prompt);
+  if (inferredRecipientName) {
+    args.recipient_name = inferredRecipientName;
+  }
+  const inferredSenderName =
+    asText(providedInput.sender_name) ||
+    asText(providedInput.senderName) ||
+    asText(providedInput.sender) ||
+    inferSenderNameFromMessage(prompt);
+  if (inferredSenderName) {
+    args.sender_name = inferredSenderName;
   }
   const inferredCc = asText(providedInput.cc) || structuredSend.cc;
   if (inferredCc) {
@@ -209,9 +309,15 @@ function inferPlannerFallback(
   }
 
   const sendIntent =
-    /\b(send|compose|draft|write)\b[\s\S]*\b(email|mail)\b/i.test(prompt) ||
+    /\b(send|submit|deliver|compose|draft|write|create|make|generate)\b[\s\S]*\b(email|mail)\b/i.test(prompt) ||
+    (Boolean(draftSource) &&
+      (/\b(send|approve|confirm|go ahead|ship it|send it)\b/i.test(prompt) ||
+        isResendRequestMessage(prompt))) ||
     /\bemail\b[\s\S]*\bto\b/i.test(prompt) ||
     /\b(?:email|mail)\s+[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(prompt);
+  const draftFirstIntent =
+    /\b(draft|write|compose|create|make|generate)\b[\s\S]*\b(email|mail)\b/i.test(prompt) &&
+    !/\b(send|submit|deliver|send now|send immediately)\b/i.test(prompt);
   const summarizeIntent =
     /\b(summarize|summary)\b[\s\S]*(email|mail|inbox|gmail)/i.test(prompt) ||
     /\b(last|latest)\s+\d{1,2}\s+emails?\b/i.test(prompt);
@@ -223,7 +329,18 @@ function inferPlannerFallback(
     /\breply\b/i.test(prompt);
 
   if (sendIntent) {
-    if (!asText(args.recipient_email)) {
+    if (draftSource) {
+      if (!asText(args.recipient_email) && draftSource.to) {
+        args.recipient_email = draftSource.to;
+      }
+      if (!asText(args.subject) && draftSource.subject) {
+        args.subject = draftSource.subject;
+      }
+      if (!asText(args.body) && draftSource.body) {
+        args.body = draftSource.body;
+      }
+    }
+    if (!asText(args.recipient_email) && !draftFirstIntent) {
       needs.add("recipient_email");
     }
     if (structuredSend.hasStructuredSubject && !asText(args.subject)) {
@@ -233,6 +350,9 @@ function inferPlannerFallback(
       needs.add("body");
     }
     const requiresConfirmation = structuredSend.sendMode !== "direct_send";
+    if (draftFirstIntent) {
+      args.draft_only = true;
+    }
     return {
       intent: "send_email",
       needs: [...needs],
@@ -240,7 +360,9 @@ function inferPlannerFallback(
       requires_confirmation: requiresConfirmation,
       assistant_message: needs.size > 0
         ? "I need the required email fields before I can send this message."
-        : requiresConfirmation
+        : draftFirstIntent
+          ? "Draft prepared. Review it and tell me if you want tone/length/detail edits."
+          : requiresConfirmation
           ? "I drafted the email. Please confirm before sending."
           : "I can send this email directly."
     };
@@ -297,51 +419,31 @@ function inferPlannerFallback(
 
 function buildDraftFallback(input: {
   prompt: string;
-  recipientName?: string;
-  recipientEmail: string;
+  recipientName?: string | null;
+  recipientEmail?: string | null;
+  senderName?: string | null;
+  companyName?: string | null;
+  intentHint?: string | null;
 }) {
-  const normalizedPrompt = input.prompt.replace(/\s+/g, " ").trim();
-  const recipientLabel = input.recipientName?.trim() || "there";
-  const meetingLink = extractMeetingLink(input.prompt);
-  const looksLikeMeetingShare =
-    /\b(meeting|invite|invitation|calendar|google meet|zoom|join link)\b/i.test(
-      normalizedPrompt
-    ) && /\b(send|share|email|mail)\b/i.test(normalizedPrompt);
+  const generated = generateIntentEmailDraft({
+    message: input.prompt,
+    recipientEmail: input.recipientEmail,
+    recipientName: input.recipientName ?? null,
+    senderName: input.senderName ?? null,
+    companyName: input.companyName ?? null,
+    intentHint: input.intentHint ?? null
+  });
 
-  let subject = "Quick note";
-  if (looksLikeMeetingShare) {
-    subject = "Meeting details";
-  } else if (/\bcongrat/i.test(normalizedPrompt) && /\bwedding\b/i.test(normalizedPrompt)) {
-    subject = "Congratulations on your wedding";
-  } else if (/\bcongrat/i.test(normalizedPrompt)) {
-    subject = "Congratulations";
-  } else if (/\bthank\b/i.test(normalizedPrompt)) {
-    subject = "Thank you";
-  } else if (/\bmeeting\b/i.test(normalizedPrompt)) {
-    subject = "Quick follow-up";
-  }
-
-  const summarizedPurpose = summarizePromptForDraftBody(input.prompt);
-
-  const body = [
-    `Hi ${recipientLabel},`,
-    "",
-    looksLikeMeetingShare
-      ? "Sharing the meeting details below."
-      : summarizedPurpose || `I wanted to reach out to ${input.recipientEmail}.`,
-    looksLikeMeetingShare && meetingLink ? `Meeting link: ${meetingLink}` : "",
-    looksLikeMeetingShare ? "Please let me know if you need any changes." : "",
-    "",
-    "Best regards,"
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  return { subject, body };
+  return {
+    subject: generated.subject,
+    body: generated.body,
+    intentHint: generated.intentHint,
+    recipientName: generated.recipientName,
+    senderName: generated.senderName
+  };
 }
 
 function buildReplyDraftFallback(input: {
-  prompt: string;
   recipientEmail: string;
   originalSubject?: string;
 }) {
@@ -357,8 +459,6 @@ function buildReplyDraftFallback(input: {
     "",
     "Thanks for your email.",
     "I will get back to you shortly.",
-    "",
-    `Context: ${input.prompt.slice(0, 220)}`,
     "",
     "Best regards,"
   ].join("\n");
@@ -488,10 +588,34 @@ function mergeArgs(
   };
 }
 
+function toDraftSnapshot(input: {
+  subject: string;
+  body: string;
+  to: string | null;
+  recipientName: string | null;
+  companyName: string | null;
+  senderName: string | null;
+  intentHint: string | null;
+}): DraftSnapshot {
+  return {
+    subject: input.subject,
+    body: input.body,
+    to: input.to,
+    recipientName: input.recipientName,
+    companyName: input.companyName,
+    senderName: input.senderName,
+    intentHint: input.intentHint
+  };
+}
+
 export async function runAgentEngine(
   payload: AgentRunEngineInput,
   deps: EngineDependencies
 ): Promise<AgentRunResponse> {
+  const runContext: { activeDraft: ActiveDraft | null; turn: number } = {
+    activeDraft: payload.activeDraft ?? null,
+    turn: Number.isFinite(payload.turn) ? Number(payload.turn) : 0
+  };
   const prompt = asText(payload.prompt);
   if (!prompt) {
     return {
@@ -500,12 +624,91 @@ export async function runAgentEngine(
       error: {
         code: "INVALID_REQUEST",
         message: "prompt is required."
-      }
+      },
+      activeDraft: runContext.activeDraft
     };
   }
 
   const providedInput = asRecord(payload.input);
-  if (!isLikelyGmailPrompt(prompt, providedInput)) {
+  const hasAnyDraft = runContext.activeDraft !== null;
+  const hasDraftInProgress =
+    runContext.activeDraft !== null && runContext.activeDraft.status !== "sent";
+  const resendRequested = isResendRequestMessage(prompt);
+
+  if (runContext.activeDraft && isDraftRegenerationRequest(prompt) && payload.confirm !== true) {
+    const regenerated = buildDraftFallback({
+      prompt,
+      recipientName: runContext.activeDraft.recipientName,
+      recipientEmail: runContext.activeDraft.to,
+      senderName: runContext.activeDraft.senderName ?? null,
+      companyName: runContext.activeDraft.companyName,
+      intentHint: runContext.activeDraft.intentHint ?? null
+    });
+    const nextDraft: ActiveDraft = {
+      ...runContext.activeDraft,
+      subject: regenerated.subject,
+      body: regenerated.body,
+      recipientName: regenerated.recipientName ?? runContext.activeDraft.recipientName,
+      senderName: regenerated.senderName ?? runContext.activeDraft.senderName ?? null,
+      intentHint: regenerated.intentHint ?? runContext.activeDraft.intentHint ?? null,
+      status: "pending_approval",
+      producedAtTurn: runContext.turn
+    };
+    runContext.activeDraft = nextDraft;
+    return {
+      status: "needs_confirmation",
+      assistant_message: buildDraftConfirmation(nextDraft),
+      draft: {
+        to: nextDraft.to ?? "[recipient email]",
+        subject: nextDraft.subject,
+        body: nextDraft.body
+      },
+      activeDraft: nextDraft
+    };
+  }
+
+  if (isDetailFillMessage(prompt, runContext.activeDraft)) {
+    const updated = fillDraftDetails(runContext.activeDraft as ActiveDraft, prompt);
+    runContext.activeDraft = updated;
+    return {
+      status: "needs_confirmation",
+      assistant_message: buildDraftConfirmation(updated),
+      draft: {
+        to: updated.to ?? "[recipient email]",
+        subject: updated.subject,
+        body: updated.body
+      },
+      activeDraft: updated
+    };
+  }
+
+  const isDraftRefinementRequest =
+    hasDraftInProgress &&
+    payload.confirm !== true &&
+    /\b(edit|revise|update|change|tone|longer|shorter|personal|formal|casual|improve|rewrite)\b/i.test(
+      prompt
+    ) &&
+    !/\b(send|approve|confirm)\b/i.test(prompt);
+  if (isDraftRefinementRequest && runContext.activeDraft) {
+    const withDetails = fillDraftDetails(runContext.activeDraft, prompt);
+    const updated = applyDeterministicDraftRefinement(withDetails, prompt);
+    runContext.activeDraft = {
+      ...updated,
+      status: "pending_approval"
+    };
+    return {
+      status: "needs_confirmation",
+      assistant_message: buildDraftConfirmation(runContext.activeDraft),
+      draft: {
+        to: runContext.activeDraft.to ?? "[recipient email]",
+        subject: runContext.activeDraft.subject,
+        body: runContext.activeDraft.body
+      },
+      activeDraft: runContext.activeDraft
+    };
+  }
+
+  if (!isLikelyGmailPrompt(prompt, providedInput) && !hasDraftInProgress && !(hasAnyDraft && resendRequested)) {
     return {
       status: "error",
       assistant_message:
@@ -513,16 +716,25 @@ export async function runAgentEngine(
       error: {
         code: "UNSUPPORTED_INTENT",
         message: "Prompt does not look like a Gmail workflow request."
-      }
+      },
+      activeDraft: runContext.activeDraft
     };
   }
 
-  const deterministicPlanner = inferPlannerFallback(prompt, providedInput);
+  const deterministicPlanner = inferPlannerFallback(
+    prompt,
+    providedInput,
+    runContext.activeDraft
+  );
   let planner: GmailPlannerOutput = deterministicPlanner;
 
   if (AGENT_RUN_ENABLE_LLM_PLANNER && deterministicPlanner.intent === "unknown") {
     try {
-      const llmPlanner = await deps.plan({ prompt, providedInput });
+      const llmPlanner = await deps.plan({
+        prompt,
+        providedInput,
+        activeDraft: runContext.activeDraft
+      });
       if (
         llmPlanner.intent !== "unknown" ||
         llmPlanner.needs.length > 0 ||
@@ -540,18 +752,42 @@ export async function runAgentEngine(
 
   if (planner.intent === "send_email") {
     const structuredSend = parseStructuredSendFields(prompt);
+    const resendRequest = isResendRequestMessage(prompt) || args.resend === true;
+    const regenerateDraftRequest = isDraftRegenerationRequest(prompt);
+    const draftSource =
+      resendRequest && runContext.activeDraft?.lastSentDraft
+        ? runContext.activeDraft.lastSentDraft
+        : runContext.activeDraft;
+    const draftOnlyRequest =
+      args.draft_only === true ||
+      structuredSend.sendMode === "draft_only" ||
+      (/\b(draft|write|compose|create|make|generate)\b[\s\S]*\b(email|mail)\b/i.test(prompt) &&
+        !/\b(send|submit|deliver|send now|send immediately)\b/i.test(prompt));
     let recipientEmail =
       asText(args.recipient_email) ||
       asText(args.to) ||
       structuredSend.recipientEmail ||
+      (draftSource?.to ?? "") ||
       pickEmailFromPrompt(prompt);
-    const recipientName = asText(args.recipient_name) || asText(args.name);
+    let recipientName =
+      asText(args.recipient_name) ||
+      asText(args.name) ||
+      inferRecipientNameFromMessage(prompt) ||
+      (draftSource?.recipientName ?? "");
+    let senderName =
+      asText(args.sender_name) ||
+      asText(args.senderName) ||
+      asText(args.sender) ||
+      inferSenderNameFromMessage(prompt) ||
+      (draftSource?.senderName ?? "");
+    let intentHint = asText(args.intent_hint) || (draftSource?.intentHint ?? "");
     const requiresConfirmation =
+      !resendRequest &&
       planner.requires_confirmation !== false &&
       structuredSend.sendMode !== "direct_send";
 
     const missing = new Set<string>(planner.needs);
-    if (!recipientEmail) {
+    if (!recipientEmail && !draftOnlyRequest) {
       missing.add("recipient_email");
     }
 
@@ -565,7 +801,11 @@ export async function runAgentEngine(
       };
     }
 
-    if (!isValidEmail(recipientEmail)) {
+    if (!recipientEmail && draftOnlyRequest) {
+      recipientEmail = "[recipient email]";
+    }
+
+    if (recipientEmail && !isValidEmail(recipientEmail) && !draftOnlyRequest) {
       return {
         status: "needs_input",
         assistant_message: "Please provide a valid recipient email address.",
@@ -574,8 +814,18 @@ export async function runAgentEngine(
     }
 
     const rawDraft = asRecord(args.draft);
-    let subject = asText(rawDraft.subject) || asText(args.subject) || structuredSend.subject;
-    let body = asText(rawDraft.body) || asText(args.body) || structuredSend.body;
+    const existingSubject = regenerateDraftRequest ? "" : draftSource?.subject ?? "";
+    const existingBody = regenerateDraftRequest ? "" : draftSource?.body ?? "";
+    let subject =
+      asText(rawDraft.subject) ||
+      asText(args.subject) ||
+      structuredSend.subject ||
+      existingSubject;
+    let body =
+      asText(rawDraft.body) ||
+      asText(args.body) ||
+      structuredSend.body ||
+      existingBody;
 
     const missingStructuredFields = new Set<string>();
     if (structuredSend.hasStructuredSubject && !subject) {
@@ -592,7 +842,9 @@ export async function runAgentEngine(
       };
     }
 
-    const shouldGenerateBody = !body && !structuredSend.hasStructuredSignal;
+    const shouldGenerateBody =
+      (!body || regenerateDraftRequest) &&
+      (!structuredSend.hasStructuredSignal || regenerateDraftRequest);
     if (shouldGenerateBody) {
       if (AGENT_RUN_ENABLE_LLM_WRITER) {
         try {
@@ -600,7 +852,8 @@ export async function runAgentEngine(
             prompt,
             recipientEmail,
             ...(recipientName ? { recipientName } : {}),
-            ...(asText(args.context) ? { extraContext: asText(args.context) } : {})
+            ...(asText(args.context) ? { extraContext: asText(args.context) } : {}),
+            activeDraft: runContext.activeDraft
           });
           if (!subject) {
             subject = asText(generated.subject);
@@ -616,12 +869,24 @@ export async function runAgentEngine(
         const fallbackDraft = buildDraftFallback({
           prompt,
           recipientEmail,
-          ...(recipientName ? { recipientName } : {})
+          recipientName: recipientName || null,
+          senderName: senderName || null,
+          companyName: draftSource?.companyName ?? null,
+          intentHint: intentHint || null
         });
         if (!subject) {
           subject = asText(fallbackDraft.subject);
         }
         body = asText(fallbackDraft.body);
+        if (!recipientName && fallbackDraft.recipientName) {
+          recipientName = fallbackDraft.recipientName;
+        }
+        if (!senderName && fallbackDraft.senderName) {
+          senderName = fallbackDraft.senderName;
+        }
+        if (!intentHint && fallbackDraft.intentHint) {
+          intentHint = fallbackDraft.intentHint;
+        }
       }
     }
 
@@ -653,10 +918,35 @@ export async function runAgentEngine(
     }
 
     if (requiresConfirmation && payload.confirm !== true) {
+      const draftForSession: ActiveDraft = {
+        subject,
+        body,
+        to: recipientEmail || null,
+        recipientName: recipientName || draftSource?.recipientName || null,
+        companyName: draftSource?.companyName || null,
+        senderName: senderName || draftSource?.senderName || null,
+        intentHint: intentHint || draftSource?.intentHint || null,
+        lastSentDraft: runContext.activeDraft?.lastSentDraft ?? null,
+        status: "pending_approval",
+        producedAtTurn: runContext.turn
+      };
+      const parsedDraft =
+        parseDraftFromResponse(buildDraftPreviewForParsing(draftForSession)) ?? draftForSession;
+      runContext.activeDraft = {
+        ...draftForSession,
+        subject: parsedDraft.subject || draftForSession.subject,
+        body: parsedDraft.body || draftForSession.body,
+        to: parsedDraft.to ?? draftForSession.to,
+        senderName: draftForSession.senderName ?? null,
+        intentHint: draftForSession.intentHint ?? null,
+        lastSentDraft: draftForSession.lastSentDraft ?? null
+      };
+
       return {
         status: "needs_confirmation",
-        assistant_message:
-          planner.assistant_message || "Please confirm this draft before sending.",
+        assistant_message: draftOnlyRequest
+          ? "Here is the draft. Want me to adjust the tone, length, or any details?"
+          : planner.assistant_message || "Please confirm this draft before sending.",
         draft: {
           to: recipientEmail,
           subject,
@@ -671,27 +961,40 @@ export async function runAgentEngine(
               bodyLength: body.length
             }
           }
-        ]
+        ],
+        activeDraft: runContext.activeDraft
       };
     }
 
     if (payload.confirm === true && requiresConfirmation) {
       const confirmDraftInput = asRecord(providedInput.draft);
+      const activeDraft = runContext.activeDraft;
+      const confirmDraftSource =
+        resendRequest && runContext.activeDraft?.lastSentDraft
+          ? runContext.activeDraft.lastSentDraft
+          : activeDraft;
       const confirmRecipient =
         asText(providedInput.recipient_email) ||
         asText(providedInput.to) ||
-        asText(confirmDraftInput.to);
+        asText(confirmDraftInput.to) ||
+        (confirmDraftSource?.to ?? "");
       const confirmSubjectRaw =
-        asText(providedInput.subject) || asText(confirmDraftInput.subject);
-      const confirmBodyRaw = asText(providedInput.body) || asText(confirmDraftInput.body);
+        asText(providedInput.subject) ||
+        asText(confirmDraftInput.subject) ||
+        (confirmDraftSource?.subject ?? "");
+      const confirmBodyRaw =
+        asText(providedInput.body) ||
+        asText(confirmDraftInput.body) ||
+        (confirmDraftSource?.body ?? "");
       const confirmSubject = sanitizeEmailSubject(confirmSubjectRaw);
       const confirmBody = sanitizeEmailBody(confirmBodyRaw);
 
       if (!confirmRecipient || !confirmSubject || !confirmBody) {
         return {
           status: "needs_confirmation",
-          assistant_message:
-            "Approval requires reviewing the draft preview first. Please approve the visible draft to send.",
+          assistant_message: draftOnlyRequest
+            ? "Draft is ready. Share any edits or add recipient details when you want to send."
+            : "Approval requires reviewing the draft preview first. Please approve the visible draft to send.",
           draft: {
             to: recipientEmail,
             subject,
@@ -706,7 +1009,8 @@ export async function runAgentEngine(
                 bodyLength: body.length
               }
             }
-          ]
+          ],
+          activeDraft: runContext.activeDraft
         };
       }
 
@@ -714,7 +1018,8 @@ export async function runAgentEngine(
         return {
           status: "needs_input",
           assistant_message: "Please provide a valid recipient email address.",
-          required_inputs: [toRequiredInput("recipient_email")]
+          required_inputs: [toRequiredInput("recipient_email")],
+          activeDraft: runContext.activeDraft
         };
       }
 
@@ -725,13 +1030,24 @@ export async function runAgentEngine(
 
     if (payload.confirm === true && !requiresConfirmation) {
       const confirmDraftInput = asRecord(providedInput.draft);
+      const activeDraft = runContext.activeDraft;
+      const confirmDraftSource =
+        resendRequest && runContext.activeDraft?.lastSentDraft
+          ? runContext.activeDraft.lastSentDraft
+          : activeDraft;
       const confirmRecipient =
         asText(providedInput.recipient_email) ||
         asText(providedInput.to) ||
-        asText(confirmDraftInput.to);
+        asText(confirmDraftInput.to) ||
+        (confirmDraftSource?.to ?? "");
       const confirmSubjectRaw =
-        asText(providedInput.subject) || asText(confirmDraftInput.subject);
-      const confirmBodyRaw = asText(providedInput.body) || asText(confirmDraftInput.body);
+        asText(providedInput.subject) ||
+        asText(confirmDraftInput.subject) ||
+        (confirmDraftSource?.subject ?? "");
+      const confirmBodyRaw =
+        asText(providedInput.body) ||
+        asText(confirmDraftInput.body) ||
+        (confirmDraftSource?.body ?? "");
       const confirmSubject = sanitizeEmailSubject(confirmSubjectRaw);
       const confirmBody = sanitizeEmailBody(confirmBodyRaw);
 
@@ -773,26 +1089,78 @@ export async function runAgentEngine(
     });
 
     if (!sendResult.ok) {
-      return mapToolExecutionError(sendResult);
+      return {
+        ...mapToolExecutionError(sendResult),
+        activeDraft: runContext.activeDraft
+      };
     }
+
+    const sendData = asRecord(sendResult.data);
+    const deliveryVerified = sendData.deliveryVerified === true || sendData.delivered === true;
+    const acceptedByProvider = sendData.acceptedByProvider === true || deliveryVerified;
+    const messageId =
+      asText(sendData.messageId) || asText(sendData.message_id) || asText(sendData.id);
+    const providerStatus =
+      asText(sendData.providerStatus) || asText(sendData.provider_status) || null;
 
     const sendAction = {
       type: "email_sent",
       meta: {
         to: recipientEmail,
         subject,
-        toolSlug: sendResult.toolSlug
+        toolSlug: sendResult.toolSlug,
+        acceptedByProvider,
+        deliveryVerified,
+        ...(messageId ? { messageId } : {})
       }
     };
     actionsTaken.push(sendAction);
     if (deps.logAction) {
       await deps.logAction(sendAction);
     }
+    const sentSnapshot = toDraftSnapshot({
+      subject,
+      body,
+      to: recipientEmail,
+      recipientName: recipientName || draftSource?.recipientName || null,
+      companyName: draftSource?.companyName || null,
+      senderName: senderName || draftSource?.senderName || null,
+      intentHint: intentHint || draftSource?.intentHint || null
+    });
+    runContext.activeDraft = {
+      subject,
+      body,
+      to: recipientEmail,
+      recipientName: sentSnapshot.recipientName,
+      companyName: sentSnapshot.companyName,
+      senderName: sentSnapshot.senderName,
+      intentHint: sentSnapshot.intentHint,
+      lastSentDraft: deliveryVerified
+        ? sentSnapshot
+        : runContext.activeDraft?.lastSentDraft ?? null,
+      status: deliveryVerified ? "sent" : "pending_approval",
+      producedAtTurn: runContext.activeDraft?.producedAtTurn ?? runContext.turn
+    };
+
+    const assistantMessage = deliveryVerified
+      ? messageId
+        ? `Email sent to ${recipientEmail} (message id: ${messageId}).`
+        : `Email sent to ${recipientEmail}.`
+      : acceptedByProvider
+        ? `Email submission accepted for ${recipientEmail}, but final delivery is not yet verified. Please check Sent folder and recipient inbox.`
+        : `Email send request finished with uncertain delivery state for ${recipientEmail}. Please verify in Sent folder.`;
 
     return {
       status: "completed",
-      assistant_message: `Email sent to ${recipientEmail}.`,
-      actions_taken: actionsTaken
+      assistant_message: assistantMessage,
+      actions_taken: actionsTaken,
+      delivery: {
+        acceptedByProvider,
+        verified: deliveryVerified,
+        ...(messageId ? { messageId } : {}),
+        ...(providerStatus ? { providerStatus } : {})
+      },
+      activeDraft: runContext.activeDraft
     };
   }
 
@@ -979,7 +1347,6 @@ export async function runAgentEngine(
 
       if (!replySubject || !replyBody) {
         const fallbackReply = buildReplyDraftFallback({
-          prompt,
           recipientEmail: to,
           originalSubject: asText(emailRecord.subject)
         });
@@ -1014,6 +1381,7 @@ export async function runAgentEngine(
     error: {
       code: "UNSUPPORTED_INTENT",
       message: `Unsupported intent: ${planner.intent}`
-    }
+    },
+    activeDraft: runContext.activeDraft
   };
 }

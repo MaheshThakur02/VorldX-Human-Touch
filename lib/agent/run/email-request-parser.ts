@@ -1,5 +1,28 @@
 export type EmailSendMode = "approval_required" | "direct_send" | "draft_only";
 
+export interface DraftSnapshot {
+  subject: string;
+  body: string;
+  to: string | null;
+  recipientName: string | null;
+  companyName: string | null;
+  senderName?: string | null;
+  intentHint?: string | null;
+}
+
+export interface ActiveDraft {
+  subject: string;
+  body: string;
+  to: string | null;
+  recipientName: string | null;
+  companyName: string | null;
+  senderName?: string | null;
+  intentHint?: string | null;
+  lastSentDraft?: DraftSnapshot | null;
+  status: "draft" | "pending_approval" | "sent";
+  producedAtTurn: number;
+}
+
 export interface StructuredSendFields {
   recipientEmail: string;
   cc: string;
@@ -128,10 +151,10 @@ function normalizeInformalMessage(value: string) {
   if (!text) return "";
   text = stripCommandPhrases(text);
   text = text
-    .replace(/\bthat he is\b/i, "that you are")
-    .replace(/\bthat she is\b/i, "that you are")
-    .replace(/\bhe is\b/i, "you are")
-    .replace(/\bshe is\b/i, "you are")
+    .replace(/\bthat he\s+(?:is|his)\b/gi, "that you are")
+    .replace(/\bthat she\s+(?:is|his)\b/gi, "that you are")
+    .replace(/\bhe\s+(?:is|his)\b/gi, "you are")
+    .replace(/\bshe\s+(?:is|his)\b/gi, "you are")
     .replace(/^that\s+/i, "")
     .trim();
   if (!text) return "";
@@ -221,6 +244,14 @@ function extractInformalBody(prompt: string, recipientEmail: string) {
 
   const trimmedTail = cleanExtractedText(cutAtFieldBoundary(tail));
   if (!trimmedTail) {
+    return "";
+  }
+  if (
+    isLikelyCommandText(trimmedTail) ||
+    /\b(?:draft|write|compose|create|generate|send)\b[\s\S]*\b(?:email|mail)\b/i.test(
+      trimmedTail
+    )
+  ) {
     return "";
   }
   if (/\b(?:subject|body|message|content)\s*[:\-]/i.test(trimmedTail)) {
@@ -364,4 +395,122 @@ export function classifyEmailDraftReply(value: string): EmailDraftReplyIntent {
     return "cancel";
   }
   return "edit";
+}
+
+export function parseDraftFromResponse(text: string): ActiveDraft | null {
+  const normalizedText = typeof text === "string" ? text.trim() : "";
+  const hasSubject = /subject:/i.test(normalizedText);
+  if (!hasSubject || normalizedText.length < 150) return null;
+
+  const subjectMatch = normalizedText.match(/subject:\s*(.+)/i);
+  const subject = subjectMatch?.[1]?.trim() ?? "";
+
+  const toMatch = normalizedText.match(
+    /to:\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/i
+  );
+  const to = toMatch?.[1]?.trim() ?? null;
+
+  const subjectIndex = normalizedText.search(/subject:/i);
+  const bodyStart = normalizedText.indexOf("\n", subjectIndex);
+  const body = bodyStart > -1 ? normalizedText.slice(bodyStart).trim() : normalizedText;
+
+  return {
+    subject,
+    body,
+    to,
+    recipientName: null,
+    companyName: null,
+    senderName: null,
+    intentHint: null,
+    lastSentDraft: null,
+    status: "draft",
+    producedAtTurn: 0
+  };
+}
+
+export function fillDraftDetails(draft: ActiveDraft, userMessage: string): ActiveDraft {
+  const updated: ActiveDraft = { ...draft };
+  const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const emailMatch = userMessage.match(
+    /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/
+  );
+  if (emailMatch) {
+    updated.to = emailMatch[0];
+  }
+
+  const companyPatterns = [
+    /company(?:\s+(?:name|is))?\s+(?:is\s+)?([A-Za-z0-9]+)/i,
+    /(?:at|for)\s+([A-Z][A-Za-z0-9]+)/,
+    /([A-Z][A-Za-z0-9]+)\s+(?:company|corp|inc|ltd)/i
+  ];
+  for (const pattern of companyPatterns) {
+    const match = userMessage.match(pattern);
+    if (match) {
+      updated.companyName = match[1];
+      break;
+    }
+  }
+
+  const namePatterns = [
+    /(?:his|her|their)\s+name\s+is\s+([A-Za-z]+)/i,
+    /(?:brother|sister|friend|colleague)'?s?\s+name\s+is\s+([A-Za-z]+)/i,
+    /name\s+is\s+([A-Za-z]+)/i,
+    /\bto\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/
+  ];
+  for (const pattern of namePatterns) {
+    const match = userMessage.match(pattern);
+    if (match) {
+      updated.recipientName = match[1];
+      break;
+    }
+  }
+
+  const senderPatterns = [
+    /my\s+name\s+is\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})/i,
+    /(?:i am|i'm|this is)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})/i,
+    /\bfrom\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/
+  ];
+  for (const pattern of senderPatterns) {
+    const match = userMessage.match(pattern);
+    if (match) {
+      updated.senderName = match[1];
+      break;
+    }
+  }
+
+  if (updated.companyName) {
+    const replacedCompanyBody = updated.body.replace(
+      /\[Company Name[^\]]*\]/gi,
+      updated.companyName
+    );
+    updated.body = replacedCompanyBody;
+    const companyRegex = new RegExp(`\\b${escapeRegex(updated.companyName)}\\b`, "i");
+    if (!companyRegex.test(updated.body)) {
+      updated.body = `${updated.body}\n\nI am excited for your next chapter at ${updated.companyName}.`;
+    }
+  }
+  if (updated.recipientName) {
+    const replacedNameBody = updated.body.replace(
+      /\[(?:Brother's|Sister's|Friend's|Recipient's)?\s*Name\]/gi,
+      updated.recipientName
+    );
+    updated.body = replacedNameBody;
+    const recipientRegex = new RegExp(`\\b${escapeRegex(updated.recipientName)}\\b`, "i");
+    if (!recipientRegex.test(updated.body)) {
+      updated.body = updated.body.replace(/^Hi\s*,?/im, `Hi ${updated.recipientName},`);
+    }
+  }
+  if (updated.senderName) {
+    const senderRegex = new RegExp(`\\b${escapeRegex(updated.senderName)}\\b`, "i");
+    if (!senderRegex.test(updated.body)) {
+      if (/Best regards,\s*$/i.test(updated.body)) {
+        updated.body = updated.body.replace(/Best regards,\s*$/i, `Best regards,\n${updated.senderName}`);
+      } else {
+        updated.body = `${updated.body}\n\nBest regards,\n${updated.senderName}`;
+      }
+    }
+  }
+
+  return updated;
 }

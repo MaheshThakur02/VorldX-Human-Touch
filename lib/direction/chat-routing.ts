@@ -1,3 +1,16 @@
+import {
+  fillDraftDetails,
+  parseDraftFromResponse,
+  type ActiveDraft
+} from "../agent/run/email-request-parser.ts";
+import {
+  generateIntentEmailDraft,
+  inferRecipientNameFromMessage,
+  inferSenderNameFromMessage,
+  isDraftRegenerationRequest,
+  isResendRequestMessage
+} from "../agent/run/draft-intent.ts";
+
 export function isSimpleGreeting(message: string) {
   const normalized = message.toLowerCase().replace(/[^a-z]/g, "");
   return (
@@ -46,8 +59,18 @@ export function isCapabilityOverviewRequest(message: string) {
 }
 
 export interface DirectionChatGmailIntent {
-  action: "LIST_RECENT_EMAILS" | "SEARCH_EMAILS" | "SUMMARIZE_EMAILS" | "SEND_EMAIL";
+  action:
+    | "LIST_RECENT_EMAILS"
+    | "SEARCH_EMAILS"
+    | "SUMMARIZE_EMAILS"
+    | "SEND_EMAIL"
+    | "DRAFT_EMAIL";
   arguments: Record<string, unknown>;
+}
+
+export interface DraftIntentHandlingResult {
+  reply: string;
+  activeDraft: ActiveDraft;
 }
 
 function asText(value: unknown) {
@@ -138,8 +161,199 @@ function extractSearchQueryFromMessage(message: string) {
   return "";
 }
 
+function buildFallbackDraftBody(input: {
+  message: string;
+  to: string | null;
+  explicitBody: string;
+  recipientName: string | null;
+  senderName: string | null;
+  companyName: string | null;
+  intentHint: string | null;
+}) {
+  if (input.explicitBody) {
+    return input.explicitBody;
+  }
+
+  const generated = generateIntentEmailDraft({
+    message: input.message,
+    recipientEmail: input.to,
+    recipientName: input.recipientName,
+    senderName: input.senderName,
+    companyName: input.companyName,
+    intentHint: input.intentHint
+  });
+  return generated.body;
+}
+
+function draftFromArgs(input: {
+  message: string;
+  args: Record<string, unknown>;
+  activeDraft: ActiveDraft | null;
+  turn: number;
+}) {
+  const resendRequested =
+    input.args.resend === true || isResendRequestMessage(input.message);
+  const regenerateRequested = isDraftRegenerationRequest(input.message);
+  const preferredDraft =
+    resendRequested && input.activeDraft?.lastSentDraft
+      ? input.activeDraft.lastSentDraft
+      : input.activeDraft;
+
+  const toRaw = asText(input.args.to || input.args.recipient_email);
+  const subjectRaw = asText(input.args.subject);
+  const explicitBody = asText(input.args.body || input.args.content);
+  const explicitRecipientName = asText(input.args.recipient_name || input.args.name);
+  const explicitSenderName = asText(input.args.sender_name || input.args.sender);
+  const inferredRecipientName = inferRecipientNameFromMessage(input.message);
+  const inferredSenderName = inferSenderNameFromMessage(input.message);
+
+  const recipientName =
+    explicitRecipientName ||
+    preferredDraft?.recipientName ||
+    inferredRecipientName ||
+    null;
+  const senderName =
+    explicitSenderName ||
+    preferredDraft?.senderName ||
+    inferredSenderName ||
+    null;
+
+  const generatedDraft = generateIntentEmailDraft({
+    message: input.message,
+    recipientEmail: toRaw || preferredDraft?.to || null,
+    recipientName,
+    senderName,
+    companyName: preferredDraft?.companyName ?? null,
+    intentHint:
+      (regenerateRequested ? preferredDraft?.intentHint : null) ??
+      preferredDraft?.intentHint ??
+      null
+  });
+
+  const base: ActiveDraft = {
+    subject: subjectRaw || generatedDraft.subject || preferredDraft?.subject || "Quick note",
+    body:
+      explicitBody ||
+      buildFallbackDraftBody({
+        message: input.message,
+        to: toRaw || preferredDraft?.to || null,
+        explicitBody,
+        recipientName,
+        senderName,
+        companyName: preferredDraft?.companyName ?? null,
+        intentHint: generatedDraft.intentHint
+      }),
+    to: toRaw || preferredDraft?.to || null,
+    recipientName,
+    companyName: preferredDraft?.companyName ?? null,
+    senderName,
+    intentHint: generatedDraft.intentHint,
+    lastSentDraft: input.activeDraft?.lastSentDraft ?? null,
+    status: "pending_approval",
+    producedAtTurn: input.turn
+  };
+
+  const withDetails = fillDraftDetails(base, input.message);
+  const preview = [
+    `To: ${withDetails.to ?? "[recipient email]"}`,
+    `Subject: ${withDetails.subject}`,
+    "",
+    withDetails.body
+  ].join("\n");
+  const parsed = parseDraftFromResponse(preview);
+
+  return {
+    ...withDetails,
+    subject: parsed?.subject || withDetails.subject,
+    body: parsed?.body || withDetails.body,
+    to: parsed?.to ?? withDetails.to,
+    senderName: withDetails.senderName ?? null,
+    intentHint: withDetails.intentHint ?? generatedDraft.intentHint,
+    lastSentDraft: withDetails.lastSentDraft ?? null
+  };
+}
+
+export function handleDirectionDraftIntent(input: {
+  message: string;
+  args: Record<string, unknown>;
+  activeDraft: ActiveDraft | null;
+  turn?: number;
+}): DraftIntentHandlingResult {
+  const draft = draftFromArgs({
+    message: input.message,
+    args: input.args,
+    activeDraft: input.activeDraft,
+    turn: Number.isFinite(input.turn) ? Number(input.turn) : 0
+  });
+
+  const reply = [
+    "Here is a draft for your email:",
+    "",
+    `To: ${draft.to ?? "[recipient email]"}`,
+    `Subject: ${draft.subject}`,
+    "",
+    draft.body,
+    "",
+    "Want me to adjust the tone, length, or any details?"
+  ].join("\n");
+
+  return { reply, activeDraft: draft };
+}
+
+export function applyDirectionSendArgsFromActiveDraft(input: {
+  args: Record<string, unknown>;
+  activeDraft: ActiveDraft | null;
+}) {
+  const merged: Record<string, unknown> = { ...input.args };
+  const sourceDraft =
+    merged.resend === true && input.activeDraft?.lastSentDraft
+      ? input.activeDraft.lastSentDraft
+      : input.activeDraft;
+  if (sourceDraft) {
+    if (!asText(merged.to || merged.recipient_email) && sourceDraft.to) {
+      merged.to = sourceDraft.to;
+    }
+    if (!asText(merged.subject) && sourceDraft.subject) {
+      merged.subject = sourceDraft.subject;
+    }
+    if (!asText(merged.body || merged.content) && sourceDraft.body) {
+      merged.body = sourceDraft.body;
+    }
+  }
+  return merged;
+}
+
+export function listMissingDirectionSendFields(args: Record<string, unknown>) {
+  const to = asText(args.to || args.recipient_email);
+  const subject = asText(args.subject);
+  const body = asText(args.body || args.content);
+  const missing: string[] = [];
+  if (!to) missing.push("recipient email");
+  if (!subject) missing.push("subject");
+  if (!body) missing.push("body");
+  return missing;
+}
+
 export function inferDirectionChatGmailIntent(message: string): DirectionChatGmailIntent | null {
   const normalized = message.toLowerCase();
+  const resendIntent = isResendRequestMessage(message);
+  if (resendIntent) {
+    return {
+      action: "SEND_EMAIL",
+      arguments: {
+        resend: true
+      }
+    };
+  }
+  if (isDraftRegenerationRequest(message)) {
+    return {
+      action: "DRAFT_EMAIL",
+      arguments: {
+        regenerate: true
+      }
+    };
+  }
+
   const hasMailboxContext =
     /\b(gmail|email|emails|mail|inbox)\b/i.test(message) ||
     /\b(last|latest|recent)\s+\d{0,2}\s*emails?\b/i.test(message);
@@ -147,8 +361,34 @@ export function inferDirectionChatGmailIntent(message: string): DirectionChatGma
     return null;
   }
 
+  const draftIntent =
+    /\b(draft|write|compose|create|make|generate)\b/.test(normalized) &&
+    /\b(email|mail|gmail)\b/.test(normalized) &&
+    !/\b(send|submit|deliver)\b/.test(normalized);
+  if (draftIntent) {
+    const to = extractEmailByLabel(message, "to") || extractFirstEmail(message);
+    const subject = extractSubjectFromMessage(message);
+    const body = extractBodyFromMessage(message);
+    const cc = extractEmailByLabel(message, "cc");
+    const bcc = extractEmailByLabel(message, "bcc");
+    const recipientName = inferRecipientNameFromMessage(message);
+    const senderName = inferSenderNameFromMessage(message);
+    const args: Record<string, unknown> = {};
+    if (to) args.to = to;
+    if (subject) args.subject = subject;
+    if (body) args.body = body;
+    if (cc) args.cc = cc;
+    if (bcc) args.bcc = bcc;
+    if (recipientName) args.recipient_name = recipientName;
+    if (senderName) args.sender_name = senderName;
+    return {
+      action: "DRAFT_EMAIL",
+      arguments: args
+    };
+  }
+
   const sendIntent =
-    /\b(send|compose|draft|write)\b/.test(normalized) &&
+    /\b(send|submit|deliver)\b/.test(normalized) &&
     /\b(email|mail|gmail)\b/.test(normalized);
   if (sendIntent) {
     const to = extractEmailByLabel(message, "to") || extractFirstEmail(message);
@@ -156,12 +396,16 @@ export function inferDirectionChatGmailIntent(message: string): DirectionChatGma
     const body = extractBodyFromMessage(message);
     const cc = extractEmailByLabel(message, "cc");
     const bcc = extractEmailByLabel(message, "bcc");
+    const recipientName = inferRecipientNameFromMessage(message);
+    const senderName = inferSenderNameFromMessage(message);
     const args: Record<string, unknown> = {};
     if (to) args.to = to;
     if (subject) args.subject = subject;
     if (body) args.body = body;
     if (cc) args.cc = cc;
     if (bcc) args.bcc = bcc;
+    if (recipientName) args.recipient_name = recipientName;
+    if (senderName) args.sender_name = senderName;
     return {
       action: "SEND_EMAIL",
       arguments: args

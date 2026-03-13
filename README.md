@@ -174,3 +174,23 @@ npm run test:agent-memory
 - Local file uploads are stored in `public/uploads/<orgId>/`.
 - Only normalized `/uploads/...` URLs are treated as local files.
 - Do not commit real API keys or secrets to `.env.example`.
+
+## Frontend Shell Contract
+
+The Control Deck chat shell is frontend-only and exposes a minimal browser contract for backend wiring.
+
+### Backend -> UI
+
+- `window.sendMessageToUI(token: string)`  
+  Stream one token/chunk into the active assistant response.
+- `window.completeMessageToUI()`  
+  Mark the current assistant stream as complete.
+- `window.showErrorInUI(message: string)`  
+  Render an inline assistant error.
+
+### UI -> Backend
+
+- `window.onUserMessage = (text: string) => { ... }`  
+  Called when user presses send.
+- `window.onStopGeneration = () => { ... }`  
+  Called when user presses stop.

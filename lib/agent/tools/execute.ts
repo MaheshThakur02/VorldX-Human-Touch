@@ -16,6 +16,10 @@ import {
   sendEmail,
   type GmailEmailRecord
 } from "@/lib/agent/tools/gmail";
+import {
+  extractSendReceipt,
+  findSentMailboxMatch
+} from "@/lib/agent/tools/send-verification";
 
 interface AgentToolActionDefinition {
   toolSlug: string;
@@ -62,6 +66,69 @@ const AGENT_TOOL_SUMMARY_USE_LLM = parseBooleanEnv("AGENT_TOOL_SUMMARY_USE_LLM",
 
 function asText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function asRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+
+async function verifySentMailboxEvidence(input: {
+  orgId: string;
+  userId: string;
+  to: string;
+  subject: string;
+  body: string;
+  sentAfterMs: number;
+}) {
+  const safeSubject = input.subject.replace(/["\\]/g, " ").trim().slice(0, 80);
+  const afterUnix =
+    Number.isFinite(input.sentAfterMs) && input.sentAfterMs > 0
+      ? Math.max(0, Math.floor((input.sentAfterMs - 300_000) / 1000))
+      : 0;
+  const afterFilter = afterUnix > 0 ? ` after:${afterUnix}` : "";
+  const query = safeSubject
+    ? `in:sent to:${input.to} subject:"${safeSubject}" newer_than:7d${afterFilter}`
+    : `in:sent to:${input.to} newer_than:7d${afterFilter}`;
+
+  try {
+    const listed = await searchEmails({
+      userId: input.userId,
+      orgId: input.orgId,
+      query,
+      max: 8
+    });
+    const matched = findSentMailboxMatch({
+      to: input.to,
+      subject: safeSubject,
+      body: input.body,
+      sentAfterMs: input.sentAfterMs,
+      emails: listed.emails
+    });
+
+    if (!matched) {
+      return {
+        deliveryVerified: false,
+        messageId: null as string | null,
+        threadId: null as string | null
+      };
+    }
+
+    return {
+      deliveryVerified: true,
+      messageId: matched.id || null,
+      threadId: matched.threadId || null
+    };
+  } catch {
+    return {
+      deliveryVerified: false,
+      messageId: null as string | null,
+      threadId: null as string | null
+    };
+  }
 }
 
 function canonicalToolkitForCompare(toolkit: string) {
@@ -371,6 +438,7 @@ async function executeNamedGmailAction(input: {
       );
     }
 
+    const sendStartedAt = Date.now();
     const sent = await sendEmail({
       userId: input.userId,
       orgId: input.orgId,
@@ -381,13 +449,40 @@ async function executeNamedGmailAction(input: {
       ...(bcc ? { bcc } : {})
     });
 
+    const rawResponse = asRecord(sent.data);
+    const receipt = extractSendReceipt(rawResponse);
+    const mailboxEvidence =
+      receipt.deliveryVerified
+        ? {
+            deliveryVerified: true,
+            messageId: receipt.messageId,
+            threadId: receipt.threadId
+          }
+        : await verifySentMailboxEvidence({
+            orgId: input.orgId,
+            userId: input.userId,
+            to,
+            subject,
+            body,
+            sentAfterMs: sendStartedAt
+          });
+    const deliveryVerified = receipt.deliveryVerified || mailboxEvidence.deliveryVerified;
+    const acceptedByProvider = receipt.acceptedByProvider || deliveryVerified;
+    const messageId = receipt.messageId || mailboxEvidence.messageId || null;
+    const threadId = receipt.threadId || mailboxEvidence.threadId || null;
+
     return {
       toolSlug: sent.toolSlug,
       data: {
         to,
         subject,
-        delivered: true,
-        raw: sent.data
+        acceptedByProvider,
+        deliveryVerified,
+        delivered: deliveryVerified,
+        ...(messageId ? { messageId } : {}),
+        ...(threadId ? { threadId } : {}),
+        ...(receipt.providerStatus ? { providerStatus: receipt.providerStatus } : {}),
+        raw: rawResponse
       } as Record<string, unknown>,
       logId: sent.logId
     };

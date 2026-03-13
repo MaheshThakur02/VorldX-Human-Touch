@@ -36,6 +36,13 @@ function asObjectArray(value: unknown): Record<string, unknown>[] {
     .map((item) => item);
 }
 
+function parseEmailList(value: string) {
+  return value
+    .split(/[;,]/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function normalizeLimit(value: unknown, fallback = 10) {
   const raw = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(raw)) return fallback;
@@ -374,6 +381,8 @@ export async function sendEmail(input: {
   const body = asText(input.body);
   const cc = asText(input.cc);
   const bcc = asText(input.bcc);
+  const ccList = cc ? parseEmailList(cc) : [];
+  const bccList = bcc ? parseEmailList(bcc) : [];
 
   if (!to || !subject || !body) {
     throw new ComposioServiceError("to, subject and body are required.", {
@@ -390,13 +399,13 @@ export async function sendEmail(input: {
     action: "SEND_EMAIL",
     arguments: {
       to,
-      recipient: to,
-      recipients: [to],
+      recipient_email: to,
       subject,
       body,
       content: body,
-      ...(cc ? { cc } : {}),
-      ...(bcc ? { bcc } : {})
+      user_id: "me",
+      ...(ccList.length > 0 ? { cc: ccList } : {}),
+      ...(bccList.length > 0 ? { bcc: bccList } : {})
     }
   });
   ensureComposioExecutionSucceeded({

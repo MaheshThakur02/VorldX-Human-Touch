@@ -9,6 +9,20 @@ function summarizeRoleList(state: SwarmOrganizationState) {
 }
 
 export function summarizeTeamStatusNode(state: SwarmOrganizationState): SwarmOrganizationState {
+  const barrierWarning = state.warnings.find((item) =>
+    item.startsWith("runCompletionBarrier waiting for terminal tasks:")
+  );
+  if (barrierWarning) {
+    return {
+      ...state,
+      finalUserResponse: [
+        "Execution is still in progress.",
+        barrierWarning,
+        "Final aggregated response will be published after all required tasks reach terminal state."
+      ].join(" ")
+    };
+  }
+
   const createdCount = state.squadWriteResults.filter((item) => item.status === "created").length;
   const reusedCount = state.squadWriteResults.filter((item) => item.status === "reused").length;
   const approvalsNeeded = state.approvalRequests.length;

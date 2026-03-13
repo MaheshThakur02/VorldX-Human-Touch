@@ -19,6 +19,7 @@ const require = createRequire(import.meta.url);
 const lockPath = resolve(process.cwd(), ".next-dev.lock");
 const cleanScriptPath = resolve(process.cwd(), "scripts/clean-next.mjs");
 const prismaGenerateScriptPath = resolve(process.cwd(), "scripts/prisma-generate-safe.mjs");
+const fsRetryHookPath = resolve(process.cwd(), "scripts/fs-ebusy-retry.cjs");
 const nextBin = require.resolve("next/dist/bin/next");
 const isOneDriveWorkspace = /(^|[\\/])onedrive([\\/]|$)/i.test(process.cwd());
 
@@ -41,6 +42,27 @@ function appendNodePathEntry(existingValue, entry) {
     items.unshift(normalizedEntry);
   }
   return items.join(delimiter);
+}
+
+function appendNodeRequireOption(existingValue, modulePath) {
+  const currentValue = existingValue?.trim() || "";
+  if (!modulePath) {
+    return currentValue;
+  }
+
+  const normalizedModulePath = modulePath.replace(/\\/g, "/");
+  if (
+    normalizePathForCompare(currentValue).includes(
+      normalizePathForCompare(normalizedModulePath)
+    ) ||
+    normalizePathForCompare(currentValue).includes(normalizePathForCompare(modulePath))
+  ) {
+    return currentValue;
+  }
+
+  const escapedPath = normalizedModulePath.replace(/"/g, '\\"');
+  const requireOption = `--require "${escapedPath}"`;
+  return currentValue ? `${requireOption} ${currentValue}` : requireOption;
 }
 
 function resolveExternalNextCacheRoot() {
@@ -127,8 +149,9 @@ if (existing?.pid && isRunningPid(existing.pid)) {
 removeLockIfMatches(existing?.pid ?? null);
 
 const devEnv = { ...process.env };
+const shouldExternalizeDist = process.platform === "win32" && isOneDriveWorkspace;
 
-if (!devEnv.NEXT_DIST_DIR && process.platform === "win32" && isOneDriveWorkspace) {
+if (!devEnv.NEXT_DIST_DIR && shouldExternalizeDist) {
   const externalCacheRoot = resolveExternalNextCacheRoot();
   const localCacheRoot = resolve(process.cwd(), ".next-local-cache");
   const localDistRelative = ".next-local-cache/dist";
@@ -206,11 +229,16 @@ if (!devEnv.NEXT_DIST_DIR && process.platform === "win32" && isOneDriveWorkspace
     }
   }
 
-  // Externalized dist paths execute compiled files outside repo root; ensure runtime
-  // still resolves project-local dependencies like "react" and "next/dist/compiled/*".
-  if (devEnv.NEXT_DIST_DIR) {
-    const projectNodeModules = resolve(process.cwd(), "node_modules");
-    devEnv.NODE_PATH = appendNodePathEntry(devEnv.NODE_PATH, projectNodeModules);
+}
+
+// Externalized dist paths execute compiled files outside repo root; ensure runtime
+// still resolves project-local dependencies like "react" and "next/dist/compiled/*".
+if (shouldExternalizeDist && devEnv.NEXT_DIST_DIR) {
+  const projectNodeModules = resolve(process.cwd(), "node_modules");
+  devEnv.NODE_PATH = appendNodePathEntry(devEnv.NODE_PATH, projectNodeModules);
+
+  if (devEnv.NEXT_DISABLE_FS_EBUSY_RETRY !== "1") {
+    devEnv.NODE_OPTIONS = appendNodeRequireOption(devEnv.NODE_OPTIONS, fsRetryHookPath);
   }
 }
 

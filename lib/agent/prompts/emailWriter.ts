@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { ActiveDraft } from "../run/email-request-parser.ts";
+
 export interface EmailWriterOutput {
   subject: string;
   body: string;
@@ -40,13 +42,31 @@ export function buildEmailWriterPrompt(input: {
   recipientEmail: string;
   recipientName?: string;
   extraContext?: string;
+  activeDraft?: ActiveDraft | null;
 }) {
+  const activeDraftContext = input.activeDraft
+    ? [
+        "ACTIVE DRAFT:",
+        `Subject: ${input.activeDraft.subject}`,
+        `To: ${input.activeDraft.to ?? "not yet provided"}`,
+        "",
+        input.activeDraft.body
+      ].join("\n")
+    : "ACTIVE DRAFT: none";
+
   const systemPrompt = [
     "Draft concise Gmail messages.",
     'Return JSON only: {"subject":"","body":""}',
     "Friendly professional tone.",
     "Subject <= 120 chars.",
-    "No signature unless asked."
+    "No signature unless asked.",
+    "RULES FOR DRAFT UPDATES:",
+    "- If ACTIVE DRAFT is provided in context, you are updating that draft — not writing a new one.",
+    "- Never shorten an existing approved draft body.",
+    "- Never replace a full email with a one-line stub.",
+    "- When filling in details, keep every paragraph of the existing body intact.",
+    "- Only replace [placeholder] tokens with real values.",
+    "- The final email must be at least as long as the draft you received."
   ].join("\n");
 
   const userPrompt = [
@@ -54,6 +74,7 @@ export function buildEmailWriterPrompt(input: {
     `To: ${input.recipientEmail}`,
     `Name: ${input.recipientName?.trim() || "Unknown"}`,
     `Context: ${input.extraContext?.trim() || "None"}`,
+    activeDraftContext,
     "JSON:"
   ].join("\n");
 

@@ -44,6 +44,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useFirebaseAuth } from "@/components/auth/firebase-auth-provider";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 import { CollaborationConsole } from "@/components/collab/collab-console";
+import { ControlDeckHumanTouch } from "@/components/control-deck-human-touch";
 import { DirectionConsole } from "@/components/direction/direction-console";
 import { BlueprintConsole } from "@/components/blueprint/blueprint-console";
 import { HubConsole } from "@/components/hub/hub-console";
@@ -57,6 +58,7 @@ import { classifyEmailDraftReply } from "@/lib/agent/run/email-request-parser";
 import { getRealtimeClient } from "@/lib/realtime/client";
 import type { AppTheme } from "@/lib/store/vorldx-store";
 import { useVorldXStore } from "@/lib/store/vorldx-store";
+import { enrichMessageForIntent } from "@/src/utils/intentDetector";
 
 type NavGroupId = "operate" | "manage";
 
@@ -167,6 +169,7 @@ type AgentRunStatus = "needs_input" | "needs_confirmation" | "completed" | "erro
 interface AgentRunResponse {
   status: AgentRunStatus;
   assistant_message: string;
+  runId?: string;
   required_inputs?: Array<{
     key: string;
     label: string;
@@ -182,6 +185,12 @@ interface AgentRunResponse {
     code: string;
     message: string;
     details?: Record<string, unknown>;
+  };
+  delivery?: {
+    acceptedByProvider: boolean;
+    verified: boolean;
+    messageId?: string | null;
+    providerStatus?: string | null;
   };
 }
 
@@ -564,7 +573,7 @@ function isGmailDirectionPrompt(value: string) {
   const prompt = value.toLowerCase();
   const hasEmailDomain = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/.test(prompt);
   const hasExplicitMailContext =
-    /\b(gmail|email|inbox|mailbox|compose email|send email|draft email)\b/.test(prompt) ||
+    /\b(gmail|email|mail|inbox|mailbox|compose (?:email|mail)|send (?:email|mail)|draft (?:email|mail))\b/.test(prompt) ||
     /\b(to:|subject:|cc:|bcc:|recipient)\b/.test(prompt);
   const hasMailAction =
     /\b(send|draft|reply|summarize|summary|find|search|read|list|compose)\b/.test(prompt);
@@ -714,7 +723,7 @@ function inferToolkitsFromDirectionPrompt(value: string) {
     youtube: ["youtube"],
     zoom: ["zoom", "video call", "video meeting", "webinar", "meeting link"],
     intercom: ["intercom"],
-    typeform: ["typeform", "form", "survey"]
+    typeform: ["typeform", "survey"]
   };
 
   for (const [toolkit, aliases] of Object.entries(toolkitAliases)) {
@@ -723,13 +732,14 @@ function inferToolkitsFromDirectionPrompt(value: string) {
       if (!normalizedAlias) return false;
       const compactAlias = normalizedAlias.replace(/[^a-z0-9]/g, "");
       const shortAlias = compactAlias.length > 0 && compactAlias.length <= 2;
+      const allowCompactAliasMatch = compactAlias.length >= 5 || normalizedAlias.includes(" ");
       if (shortAlias) {
         const bounded = new RegExp(`(?:^|\\W)${escapeRegex(normalizedAlias)}(?:$|\\W)`, "i");
         return bounded.test(prompt);
       }
       return (
         prompt.includes(normalizedAlias) ||
-        (compactAlias.length >= 4 && compactPrompt.includes(compactAlias))
+        (allowCompactAliasMatch && compactPrompt.includes(compactAlias))
       );
     });
     if (matched) {
@@ -955,6 +965,7 @@ export function VorldXShell() {
   );
   const [controlMessage, setControlMessage] = useState<ControlMessage | null>(null);
   const [agentRunResult, setAgentRunResult] = useState<AgentRunResponse | null>(null);
+  const [agentRunId, setAgentRunId] = useState("");
   const [agentRunInputValues, setAgentRunInputValues] = useState<Record<string, string>>({});
   const [agentRunPromptSnapshot, setAgentRunPromptSnapshot] = useState("");
   const [agentRunInputSourceUrl, setAgentRunInputSourceUrl] = useState("");
@@ -1453,6 +1464,7 @@ export function VorldXShell() {
       nextRunAt: toDatetimeLocalValue(new Date().toISOString())
     });
     setAgentRunResult(null);
+    setAgentRunId("");
     setAgentRunInputValues({});
     setAgentRunPromptSnapshot("");
     setPendingHumanInput(null);
@@ -2057,6 +2069,8 @@ export function VorldXShell() {
       return;
     }
 
+    const intentEnrichment = enrichMessageForIntent(message);
+
     const [provider, model] = directionModelId.split(":");
     setDirectionChatInFlight(true);
     setControlMessage(null);
@@ -2085,7 +2099,7 @@ export function VorldXShell() {
         },
         body: JSON.stringify({
           orgId: resolvedOrg.id,
-          message,
+          message: intentEnrichment.message,
           history: directionTurns.slice(-10).map((turn) => ({
             role: turn.role,
             content: turn.content
@@ -3087,6 +3101,7 @@ export function VorldXShell() {
           }
         }
 
+        const intentEnrichment = enrichMessageForIntent(prompt);
         const runtimeInput: Record<string, string> = {
           ...(inputOverride ?? agentRunInputValues),
           orgId: resolvedOrg?.id ?? ""
@@ -3104,10 +3119,11 @@ export function VorldXShell() {
             ...(authHeaders ?? {})
           },
           body: JSON.stringify({
-            prompt,
+            prompt: intentEnrichment.message,
             input: runtimeInput,
             confirm: confirmEmailDraft,
-            orgId: resolvedOrg?.id
+            orgId: resolvedOrg?.id,
+            ...(agentRunId ? { runId: agentRunId } : {})
           })
         });
 
@@ -3122,6 +3138,9 @@ export function VorldXShell() {
 
         setAgentRunPromptSnapshot(prompt);
         setAgentRunResult(payload);
+        if (typeof payload.runId === "string" && payload.runId.trim()) {
+          setAgentRunId(payload.runId.trim());
+        }
         if (payload.status !== "needs_input") {
           setAgentRunInputSourceUrl("");
           setAgentRunInputFile(null);
@@ -3136,6 +3155,19 @@ export function VorldXShell() {
         }
 
         if (payload.status === "completed") {
+          const hasDelivery = Boolean(payload.delivery);
+          const deliveryVerified = payload.delivery?.verified === true;
+          const deliveryAccepted =
+            payload.delivery?.acceptedByProvider === true || deliveryVerified;
+          const completionMessage =
+            payload.assistant_message?.trim() ||
+            (hasDelivery
+              ? deliveryVerified
+                ? "Email sent."
+                : deliveryAccepted
+                  ? "Email submission accepted, but delivery is not yet verified."
+                  : "Email send state is uncertain. Verify in Sent folder."
+              : "Main Agent completed the Gmail action.");
           const recipient =
             pendingEmailApproval?.draft.to ||
             (typeof runtimeInput["recipient_email"] === "string"
@@ -3153,12 +3185,12 @@ export function VorldXShell() {
             {
               id: `org-email-complete-${Date.now()}`,
               role: "organization",
-              content: payload.assistant_message || "Email sent successfully."
+              content: completionMessage
             }
           ]);
           setControlMessage({
-            tone: "success",
-            text: payload.assistant_message || "Main Agent completed the Gmail action."
+            tone: hasDelivery ? (deliveryVerified ? "success" : "warning") : "success",
+            text: completionMessage
           });
         } else if (payload.status === "needs_input") {
           const requiredInputLines = (payload.required_inputs ?? [])
@@ -3222,28 +3254,21 @@ export function VorldXShell() {
             typeof payload.error?.details?.connectUrl === "string"
               ? payload.error.details.connectUrl
               : "";
-          setDirectionTurns((prev) => [
-            ...prev,
-            {
-              id: `org-email-error-${Date.now()}`,
-              role: "organization",
-              content: [
-                payload.error?.message || payload.assistant_message || "Main Agent run failed.",
-                connectUrl ? `Connect Gmail first: ${connectUrl}` : ""
-              ]
-                .filter(Boolean)
-                .join("\n")
-            }
-          ]);
           setControlMessage({
             tone: "error",
-            text: payload.error?.message || payload.assistant_message || "Main Agent run failed."
+            text: [
+              payload.error?.message || payload.assistant_message || "Main Agent run failed.",
+              connectUrl ? `Connect Gmail first: ${connectUrl}` : ""
+            ]
+              .filter(Boolean)
+              .join("\n")
           });
         }
         return;
       }
 
       setAgentRunResult(null);
+      setAgentRunId("");
       setAgentRunInputValues({});
       setAgentRunPromptSnapshot("");
 
@@ -3329,6 +3354,7 @@ export function VorldXShell() {
   }, [
     intent,
     launchInFlight,
+    agentRunId,
     agentRunInputValues,
     pendingEmailApproval,
     authHeaders,
@@ -3482,6 +3508,7 @@ export function VorldXShell() {
 
   const handleRejectAgentInput = useCallback(() => {
     setAgentRunResult(null);
+    setAgentRunId("");
     setAgentRunInputValues({});
     setAgentRunInputSourceUrl("");
     setAgentRunInputFile(null);
@@ -4207,63 +4234,12 @@ export function VorldXShell() {
                 }}
               />
             ) : activeTab === "control" ? (
-              <ControlDeckSurface
-                themeStyle={themeStyle}
+              <ControlDeckHumanTouch
                 mode={controlMode}
-                conversationDetail={controlConversationDetail}
-                engaged={controlEngaged}
-                directionGiven={intent}
+                appTheme={theme}
                 turns={directionTurns}
-                directionModelId={directionModelId}
-                directionModels={DIRECTION_MODELS}
-                directionChatInFlight={directionChatInFlight}
-                directionPlanningInFlight={directionPlanningInFlight}
                 message={controlMessage}
-                agentRunResult={agentRunResult}
-                agentRunInputValues={agentRunInputValues}
-                pendingPlanLaunchApproval={pendingPlanLaunchApproval}
-                pendingEmailApproval={pendingEmailApproval}
-                pendingToolkitApproval={pendingToolkitApproval}
-                agentInputSourceUrl={agentRunInputSourceUrl}
-                agentInputFile={agentRunInputFile}
-                agentInputSubmitting={agentRunInputSubmitting}
-                agentActionBusy={launchInFlight || toolkitConnectInFlight}
-                onModeChange={setControlMode}
-                onConversationDetailChange={setControlConversationDetail}
-                onDirectionGivenChange={(value) => {
-                  setIntent(value);
-                  if (
-                    agentRunPromptSnapshot &&
-                    value.trim() !== agentRunPromptSnapshot
-                  ) {
-                    setAgentRunResult(null);
-                    setAgentRunInputValues({});
-                    setAgentRunInputSourceUrl("");
-                    setAgentRunInputFile(null);
-                  }
-                }}
-                onAgentInputValueChange={(key, value) =>
-                  setAgentRunInputValues((prev) => ({
-                    ...prev,
-                    [key]: value
-                  }))
-                }
-                onAgentInputSourceUrlChange={setAgentRunInputSourceUrl}
-                onAgentInputFileChange={setAgentRunInputFile}
-                onSubmitAgentInputs={() => void handleSubmitAgentInputs()}
-                onRejectAgentInput={handleRejectAgentInput}
-                onApprovePlanLaunch={() => void handleApprovePlanLaunch()}
-                onRejectPlanLaunch={handleRejectPlanLaunch}
-                onApproveEmailDraft={() => void handleApproveEmailDraft()}
-                onRejectEmailDraft={handleRejectEmailDraft}
-                onApproveToolkitAccess={() => void handleApproveToolkitAccess()}
-                onRejectToolkitAccess={handleRejectToolkitAccess}
-                onOpenTools={() => {
-                  router.replace("/app?tab=hub&hubScope=TOOLS");
-                  handleTabChange("hub");
-                }}
-                onDirectionModelChange={setDirectionModelId}
-                onEngageWithMode={(nextMode) => {
+                onModeChange={(nextMode) => {
                   setControlMode(nextMode);
                   setControlEngaged(true);
                   if (nextMode === "DIRECTION") {
@@ -4272,6 +4248,10 @@ export function VorldXShell() {
                     setControlConversationDetail("REASONING_MIN");
                   }
                 }}
+                directionChatInFlight={directionChatInFlight}
+                directionPlanningInFlight={directionPlanningInFlight}
+                agentInputSubmitting={agentRunInputSubmitting}
+                agentActionBusy={launchInFlight || toolkitConnectInFlight}
                 onSendMessage={async (message, modeForMessage) => {
                   if (modeForMessage === "MINDSTORM") {
                     const trimmed = message.trim();
@@ -4285,6 +4265,7 @@ export function VorldXShell() {
                       setPendingEmailApproval(null);
                       setPendingPlanLaunchApproval(null);
                       setAgentRunResult(null);
+                      setAgentRunId("");
                       setAgentRunInputValues({});
                       setAgentRunInputSourceUrl("");
                       setAgentRunInputFile(null);
@@ -4335,6 +4316,7 @@ export function VorldXShell() {
                       setPendingPlanLaunchApproval(null);
                       setPendingChatPlanRoute(null);
                       setAgentRunResult(null);
+                      setAgentRunId("");
                       setAgentRunInputValues({});
                       setAgentRunInputSourceUrl("");
                       setAgentRunInputFile(null);
@@ -4468,15 +4450,13 @@ export function VorldXShell() {
                   setApprovedToolkitRequestId(null);
                   setPendingEmailApproval(null);
                   setAgentRunResult(null);
+                  setAgentRunId("");
                   setAgentRunInputValues({});
                   setAgentRunInputSourceUrl("");
                   setAgentRunInputFile(null);
                   setIntent(trimmed);
                   await handleDirectionChat(trimmed, "DIRECTION");
                 }}
-                onVoiceIntent={handleVoiceIntent}
-                isRecordingIntent={isRecordingIntent}
-                planningResult={directionPlanningResult}
               />
             ) : activeTab === "flow" ? (
               <WorkflowConsole

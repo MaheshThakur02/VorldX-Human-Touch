@@ -7,6 +7,11 @@ import type {
   SwarmTeamType,
   ToolRequest
 } from "../state.ts";
+import type {
+  PersistedTaskSchema,
+  PersistedToolReceipt
+} from "@/lib/orchestration/task-schema";
+import type { OrchestrationEventType } from "@/lib/orchestration/event-log";
 
 export interface LangGraphOrganizationContext {
   orgId: string;
@@ -22,6 +27,7 @@ export interface ToolExecutionResult {
   action: string;
   toolSlug?: string;
   data?: Record<string, unknown>;
+  receipts?: PersistedToolReceipt[];
   error?: {
     code: string;
     message: string;
@@ -42,7 +48,21 @@ export interface HubContextResult {
 
 export interface ApprovalRequestResult {
   checkpointId: string;
-  status: "PENDING" | "APPROVED" | "REJECTED";
+  status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
+  idempotencyKey: string;
+}
+
+export interface DurableTaskSnapshot {
+  taskId: string;
+  state: PersistedTaskSchema["state"];
+  attempts: number;
+  objective: string;
+  output: {
+    outputFileId: string | null;
+    payload: Record<string, unknown> | null;
+  };
+  toolReceipts: PersistedToolReceipt[];
+  waived: boolean;
 }
 
 export interface OrganizationGraphAdapters {
@@ -70,10 +90,13 @@ export interface OrganizationGraphAdapters {
     orgId: string;
     teamType: SwarmTeamType;
     graphRunId: string;
+    sourceRunId?: string;
+    sourceTaskId: string;
     category: string;
     title: string;
     content: string;
     role?: string;
+    idempotencyKey?: string;
   }): Promise<HubEntryResult>;
   searchSharedKnowledge(input: {
     orgId: string;
@@ -90,7 +113,59 @@ export interface OrganizationGraphAdapters {
     orgId: string;
     reason: string;
     metadata: Record<string, unknown>;
+    idempotencyKey: string;
+    runId: string;
+    taskId: string;
+    policyHash: string;
   }): Promise<ApprovalRequestResult>;
+  ensureDurableRun?(input: {
+    orgId: string;
+    userId: string;
+    graphRunId: string;
+    prompt: string;
+  }): Promise<{ runId: string }>;
+  persistDurableTasks?(input: {
+    orgId: string;
+    runId: string;
+    tasks: PersistedTaskSchema[];
+  }): Promise<DurableTaskSnapshot[]>;
+  readDurableTaskSnapshots?(input: { orgId: string; runId: string }): Promise<DurableTaskSnapshot[]>;
+  markDurableTaskState?(input: {
+    orgId: string;
+    runId: string;
+    taskId: string;
+    nextState: PersistedTaskSchema["state"];
+    attempts?: number;
+    outputFileId?: string | null;
+    outputPayload?: Record<string, unknown> | null;
+    waived?: boolean;
+  }): Promise<DurableTaskSnapshot | null>;
+  upsertToolReceipt?(input: {
+    orgId: string;
+    runId: string;
+    taskId: string;
+    receipt: PersistedToolReceipt;
+    idempotencyKey: string;
+  }): Promise<PersistedToolReceipt>;
+  verifyTaskReceipts?(input: {
+    orgId: string;
+    runId: string;
+    taskId: string;
+  }): Promise<{ ok: boolean; missingToolCallIds: string[]; receipts: PersistedToolReceipt[] }>;
+  appendOrchestrationEvent?(input: {
+    orgId: string;
+    runId: string;
+    taskId: string;
+    attempt: number;
+    agentId: string;
+    eventType: OrchestrationEventType;
+    idempotencyKey?: string;
+    payload?: Record<string, unknown>;
+  }): Promise<void>;
+  runCompletionBarrier?(input: {
+    orgId: string;
+    runId: string;
+  }): Promise<{ ok: boolean; blockingTaskIds: string[]; report: DurableTaskSnapshot[] }>;
   logGraphEvent(input: {
     orgId: string;
     graphRunId: string;

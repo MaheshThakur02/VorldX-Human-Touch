@@ -502,38 +502,13 @@ function isMainOrchestratorRole(agentRole: string) {
   return normalized.includes("orchestrator") || normalized.includes("main");
 }
 
-function buildMainOrchestratorCriticalRules() {
-  return SWARM_CONCISE_MODE
-    ? [
-        "Main orchestrator rules:",
-        "1) Include required toolkits in plan (`toolkits:`).",
-        "2) If toolkit is not connected, stop and request Human Touch.",
-        "3) Never claim external execution without tool evidence.",
-        "4) For action tasks, provide exact fields (recipient, subject, body).",
-        "5) If missing evidence, mark `Not executed`."
-      ].join("\n")
-    : [
-        "CRITICAL RULES (MAIN ORCHESTRATOR):",
-        "1) Determine required platform/toolkit before execution and explicitly include `toolkits: ...` in your plan.",
-        "2) Connection gate is mandatory: if a required toolkit is not connected, stop and request Human Touch to connect it.",
-        "3) Never report external execution as complete unless tool execution evidence is present in context.",
-        "4) For action tasks, provide exact execution fields (for email: recipient, subject, body) without ambiguity.",
-        "5) If a step fails, return root cause plus immediate retry/fallback path instead of silent continuation.",
-        "6) If evidence is missing, explicitly mark outcome as `Not executed` instead of implying completion."
-      ].join("\n");
-}
-
 function buildSystemPrompt(agentName: string, agentRole: string) {
   if (isMainOrchestratorRole(agentRole)) {
-    return [
-      buildOrganizationMainAgentPrompt({
-        orgName: "the organization",
-        mode: "execution",
-        contextAvailable: true
-      }),
-      "",
-      buildMainOrchestratorCriticalRules()
-    ].join("\n");
+    return buildOrganizationMainAgentPrompt({
+      orgName: "the organization",
+      mode: "execution",
+      contextAvailable: true
+    });
   }
 
   const base = SWARM_CONCISE_MODE

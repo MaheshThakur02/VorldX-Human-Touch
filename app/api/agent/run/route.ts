@@ -6,7 +6,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { executeSwarmAgent } from "@/lib/ai/swarm-runtime";
 import { getOrgLlmRuntime } from "@/lib/ai/org-llm-settings";
-import { runAgentEngine, type AgentRunResponse } from "@/lib/agent/run/engine";
+import {
+  runAgentEngine,
+  type ActiveDraft,
+  type AgentRunResponse
+} from "@/lib/agent/run/engine";
 import { executeAgentTool } from "@/lib/agent/tools/execute";
 import { buildEmailWriterPrompt, parseEmailWriterOutput } from "@/lib/agent/prompts/emailWriter";
 import {
@@ -21,6 +25,7 @@ type RunBody = {
   input?: Record<string, unknown>;
   confirm?: boolean;
   orgId?: string;
+  runId?: string;
 } | null;
 
 interface WorkflowStepMetric {
@@ -74,6 +79,19 @@ interface ActorRunGuardBucket {
 
 const actorRunGuards = new Map<string, ActorRunGuardBucket>();
 // Process-local guard for single-node stability; promote to shared store for multi-instance deployments.
+
+interface AgentRunSessionState {
+  runId: string;
+  orgId: string;
+  userId: string;
+  activeDraft: ActiveDraft | null;
+  turn: number;
+  updatedAt: number;
+}
+
+const agentRunSessions = new Map<string, AgentRunSessionState>();
+const actorActiveRunIds = new Map<string, string>();
+const RUN_SESSION_TTL_MS = 1000 * 60 * 60 * 6;
 
 function parsePositiveEnvInt(name: string, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const raw = Number(process.env[name]);
@@ -192,6 +210,65 @@ function releaseActorRunGuard(key: string) {
     return;
   }
   actorRunGuards.set(key, bucket);
+}
+
+function runSessionKey(input: { orgId: string; userId: string; runId: string }) {
+  return `${input.orgId}:${input.userId}:${input.runId}`;
+}
+
+function actorSessionKey(input: { orgId: string; userId: string }) {
+  return `${input.orgId}:${input.userId}`;
+}
+
+function cleanupRunSessions(now: number) {
+  for (const [key, session] of agentRunSessions.entries()) {
+    if (now - session.updatedAt > RUN_SESSION_TTL_MS) {
+      agentRunSessions.delete(key);
+      const actorKey = actorSessionKey({ orgId: session.orgId, userId: session.userId });
+      if (actorActiveRunIds.get(actorKey) === session.runId) {
+        actorActiveRunIds.delete(actorKey);
+      }
+    }
+  }
+}
+
+function loadRunSession(input: {
+  orgId: string;
+  userId: string;
+  requestedRunId?: string;
+}) {
+  cleanupRunSessions(Date.now());
+  const actorKey = actorSessionKey({ orgId: input.orgId, userId: input.userId });
+  const runId = input.requestedRunId?.trim() || actorActiveRunIds.get(actorKey) || "";
+  if (!runId) {
+    return null;
+  }
+  const key = runSessionKey({ orgId: input.orgId, userId: input.userId, runId });
+  const session = agentRunSessions.get(key);
+  if (!session) {
+    return null;
+  }
+  if (Date.now() - session.updatedAt > RUN_SESSION_TTL_MS) {
+    agentRunSessions.delete(key);
+    if (actorActiveRunIds.get(actorKey) === runId) {
+      actorActiveRunIds.delete(actorKey);
+    }
+    return null;
+  }
+  return session;
+}
+
+function saveRunSession(session: AgentRunSessionState) {
+  const key = runSessionKey({
+    orgId: session.orgId,
+    userId: session.userId,
+    runId: session.runId
+  });
+  agentRunSessions.set(key, { ...session, updatedAt: Date.now() });
+  actorActiveRunIds.set(
+    actorSessionKey({ orgId: session.orgId, userId: session.userId }),
+    session.runId
+  );
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
@@ -523,7 +600,16 @@ export async function POST(request: NextRequest) {
     const prompt = asText(body?.prompt);
     const providedInput = asRecord(body?.input);
     const confirm = body?.confirm === true;
+    const requestedRunId = asText(body?.runId);
     const workflowSteps: WorkflowStepMetric[] = [];
+    const loadedSession = loadRunSession({
+      orgId: actorResult.actor.orgId,
+      userId: actorResult.actor.userId,
+      ...(requestedRunId ? { requestedRunId } : {})
+    });
+    const runId = loadedSession?.runId || requestedRunId || `run_${randomUUID().slice(0, 12)}`;
+    const runTurn = (loadedSession?.turn ?? 0) + 1;
+    const sessionDraft = loadedSession?.activeDraft ?? null;
 
     const runGuardKey = `${actorResult.actor.orgId}:${actorResult.actor.userId}`;
     const guardResult = acquireActorRunGuard(runGuardKey);
@@ -552,13 +638,16 @@ export async function POST(request: NextRequest) {
         {
           prompt,
           input: providedInput,
-          confirm
+          confirm,
+          activeDraft: sessionDraft,
+          turn: runTurn
         },
         {
-          plan: async ({ prompt: rawPrompt, providedInput: rawInput }) => {
+          plan: async ({ prompt: rawPrompt, providedInput: rawInput, activeDraft }) => {
             const prompts = buildGmailPlannerPrompt({
               prompt: rawPrompt,
-              providedInput: rawInput
+              providedInput: rawInput,
+              activeDraft: activeDraft ?? null
             });
             const plannerCall = await runJsonTask({
               orgId: actorResult.actor.orgId,
@@ -589,12 +678,19 @@ export async function POST(request: NextRequest) {
             }
             return parsed as GmailPlannerOutput;
           },
-          writeEmail: async ({ prompt: rawPrompt, recipientEmail, recipientName, extraContext }) => {
+          writeEmail: async ({
+            prompt: rawPrompt,
+            recipientEmail,
+            recipientName,
+            extraContext,
+            activeDraft
+          }) => {
             const prompts = buildEmailWriterPrompt({
               userPrompt: rawPrompt,
               recipientEmail,
               ...(recipientName ? { recipientName } : {}),
-              ...(extraContext ? { extraContext } : {})
+              ...(extraContext ? { extraContext } : {}),
+              activeDraft: activeDraft ?? null
             });
             const writerCall = await runJsonTask({
               orgId: actorResult.actor.orgId,
@@ -668,6 +764,19 @@ export async function POST(request: NextRequest) {
       AGENT_RUN_TIMEOUT_MS
     );
 
+    const nextActiveDraft =
+      Object.prototype.hasOwnProperty.call(response, "activeDraft")
+        ? (response.activeDraft ?? null)
+        : sessionDraft;
+    saveRunSession({
+      runId,
+      orgId: actorResult.actor.orgId,
+      userId: actorResult.actor.userId,
+      activeDraft: nextActiveDraft,
+      turn: runTurn,
+      updatedAt: Date.now()
+    });
+
     const telemetry = buildWorkflowTelemetry({
       workflowId,
       steps: workflowSteps,
@@ -675,13 +784,18 @@ export async function POST(request: NextRequest) {
     });
     await writeWorkflowTelemetryLog(actorResult.actor.orgId, telemetry);
 
+    const { activeDraft: _activeDraftIgnored, ...responseWithoutDraft } = response;
     const responsePayload = AGENT_RUN_EXPOSE_METRICS
       ? {
-          ...response,
+          ...responseWithoutDraft,
+          runId,
           workflow_metrics: telemetry,
           token_burn_map: telemetry.token_burn_map
         }
-      : response;
+      : {
+          ...responseWithoutDraft,
+          runId
+        };
 
     return NextResponse.json(responsePayload, { status: statusCodeForResponse(response) });
   } catch (error) {

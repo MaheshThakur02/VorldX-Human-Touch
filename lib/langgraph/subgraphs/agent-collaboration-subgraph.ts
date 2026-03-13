@@ -11,7 +11,7 @@ export async function runAgentCollaborationSubgraph(
 ) {
   let next = assignInitialTasksNode(state);
   next = await runCollaborationCycleNode(next, adapters);
-  next = collectAgentOutputsNode(next);
+  next = await collectAgentOutputsNode(next, adapters);
   next = resolveDependenciesNode(next);
   return next;
 }

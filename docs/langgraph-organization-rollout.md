@@ -1,55 +1,40 @@
 # LangGraph Organization Orchestration
 
 ## Purpose
-- Additive LangGraph-style orchestration for Swarm team bootstrap and coordination.
-- No rewrite of existing Swarm, tool execution, approval, RAG, Hub, or Squad systems.
+- LangGraph is the planning/routing layer.
+- Durable execution is unified in Flow/Task + event log infrastructure.
+- LangGraph no longer owns ephemeral completion state.
 
-## Entry Integration
-- Control Deck route: `app/api/control/direction-chat/route.ts`
-- New feature-gated hook: `lib/langgraph/swarm-organization-entry.ts`
-- Behavior:
-  - Feature flag off or non-team request: legacy Swarm path unchanged.
-  - Feature flag on and team intent: execute organization graph path.
+## Unified Runtime Contract
+- Every request enters one routing layer and emits normalized tasks into durable tables.
+- Shared task schema/state machine is used by all orchestration paths.
+- Completion is gated by run barrier checks and persisted outputs.
 
-## Feature Flags
-- `FEATURE_LANGGRAPH_ORGANIZATION_TEAMS`
-- `FEATURE_LANGGRAPH_ORGANIZATION_ORG_ALLOWLIST`
-- `FEATURE_LANGGRAPH_ORGANIZATION_USER_ALLOWLIST`
+## Execution Ownership
+1. LangGraph planning: classify, decompose, validate
+2. Persist tasks to durable run (`Flow`/`Task`)
+3. Execute via durable engine
+4. Verify receipts + committed outputs
+5. Aggregate from durable storage
+6. Publish to Hub and Control Deck from event log projection
 
-## Graph Modules
-- `lib/langgraph/state.ts`
-- `lib/langgraph/swarm-organization-graph.ts`
-- `lib/langgraph/nodes/*`
-- `lib/langgraph/subgraphs/*`
-- `lib/langgraph/templates/*`
-- `lib/langgraph/adapters/*`
-- `lib/langgraph/utils/*`
+## Invariants
+- Task completion requires committed output + verified receipts.
+- Approval creation is idempotent by `run_id + task_id + policy_hash`.
+- Hub writes are idempotent and must include `sourceTaskId`.
+- Event envelope is append-only and idempotent by `idempotency_key`.
 
-## Existing Systems Preserved
-- Tool execution remains via `executeAgentTool` (`lib/agent/tools/execute.ts`) through existing Composio path.
-- Approval requests persist through `ApprovalCheckpoint` (existing approval system contracts).
-- Memory retrieval uses existing `searchAgentMemory`.
-- Hub collaboration uses existing Hub file model and `ensureCompanyDataFile`.
-- Squad population uses existing `personnel` model and keeps manual workflows unchanged.
+## Required Events
+- `TASK_ASSIGNED`
+- `TASK_ACKED`
+- `TASK_STARTED`
+- `TOOL_CALL_STARTED`
+- `TOOL_CALL_FINISHED`
+- `TASK_BLOCKED`
+- `TASK_COMPLETED`
+- `TASK_FAILED`
+- `TASK_TIMEOUT`
 
-## Team Bootstrap Flow
-1. Ingest + classify request
-2. Load org/squad context + shared memory references
-3. Generate validated team blueprint from template registry
-4. Generate role prompts and tool profiles
-5. Persist/reuse agents into Squad
-6. Initialize/reuse Hub mission context
-7. Assign initial tasks and run safe collaboration cycle
-8. Create approval checkpoints for high-sensitivity actions
-9. Return manager-style Swarm summary
-
-## Safety Notes
-- Retrieved memory is handled as reference context, not trusted policy.
-- No new raw SQL introduced in LangGraph module.
-- Tool and approval contracts are adapter-based, not bypassed.
-- Legacy Swarm path remains default fallback.
-
-## Next Hardening Steps
-- Move graph runs to queue/worker jobs for long-running collaboration cycles.
-- Add retry policies and DLQ semantics for tool/approval failures.
-- Expand graph telemetry into centralized metrics dashboards.
+## Control Deck Projection
+- Control Deck status derives from orchestration event log projection.
+- Task snapshots are supporting data only; event log is the source of truth for lifecycle state.

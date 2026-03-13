@@ -726,6 +726,73 @@ test("executeToolAction uses org fallback owner when actor user has no direct co
   assert.equal(executedConnectionId, "conn_shared_fallback");
 });
 
+test("executeToolAction strips sender_email-like fields for Gmail send actions", async () => {
+  const store = createStore();
+  const mockClient = createMockClient();
+  mockClient.connectedAccounts.list = async () => ({
+    items: [
+      {
+        id: "conn_gmail_send",
+        status: "ACTIVE",
+        toolkit: { slug: "gmail" }
+      }
+    ]
+  });
+
+  let executedArguments: Record<string, unknown> | null = null;
+  mockClient.tools.execute = async (
+    _slug: string,
+    body: { arguments?: Record<string, unknown> }
+  ) => {
+    executedArguments =
+      body.arguments && typeof body.arguments === "object" ? body.arguments : null;
+    return {
+      successful: true,
+      data: { sent: true },
+      logId: "log_strip_sender_fields"
+    };
+  };
+
+  const core = new ComposioServiceCore({
+    enabled: true,
+    provider: "composio",
+    allowlistedToolkits: ["gmail", "slack"],
+    callbackUrl: "http://localhost:3001/api/integrations/composio/oauth/callback",
+    createClient: () => mockClient,
+    store: store.adapter,
+    createStateToken: () => "signed-state",
+    verifyStateToken: () => null,
+    connectUrlForToolkit: (toolkit: string) => `/app?toolkit=${toolkit}`
+  });
+
+  const result = await core.executeToolAction({
+    userId: "user-1",
+    orgId: "org-1",
+    toolkit: "gmail",
+    toolSlug: "GMAIL_SEND_EMAIL",
+    action: "SEND_EMAIL",
+    arguments: {
+      to: "a@example.com",
+      subject: "Hi",
+      body: "Hello",
+      sender_email: "wrong-sender@example.com",
+      from_email: "wrong-from@example.com",
+      from: "wrong-from-plain@example.com",
+      sender: "wrong-sender-plain@example.com",
+      cc: "cc@example.com"
+    }
+  });
+
+  assert.equal(result.successful, true);
+  assert.ok(executedArguments);
+  assert.equal(executedArguments?.to, "a@example.com");
+  assert.equal(executedArguments?.cc, "cc@example.com");
+  assert.equal("sender_email" in (executedArguments ?? {}), false);
+  assert.equal("from_email" in (executedArguments ?? {}), false);
+  assert.equal("from" in (executedArguments ?? {}), false);
+  assert.equal("sender" in (executedArguments ?? {}), false);
+});
+
 test("listAvailableToolkits includes app launch URL for popup embedding", async () => {
   const store = createStore();
   const core = new ComposioServiceCore({

@@ -4,6 +4,7 @@ import { HubFileType, TaskStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/prisma";
+import { projectRunTaskStates } from "@/lib/orchestration/event-log";
 import { requireOrgAccess } from "@/lib/security/org-access";
 
 type WorkflowLane = "QUEUED" | "INPUT" | "INPROCESS" | "OUTPUT";
@@ -15,11 +16,31 @@ function resolveLane(task: { status: TaskStatus; isPausedForInput: boolean }): W
   return "OUTPUT";
 }
 
+function resolveLaneFromEventState(eventState: string | null): WorkflowLane | null {
+  if (!eventState) return null;
+  const normalized = eventState.trim().toUpperCase();
+  if (normalized === "PENDING" || normalized === "ASSIGNED" || normalized === "ACKED") {
+    return "QUEUED";
+  }
+  if (normalized === "RUNNING") return "INPROCESS";
+  if (normalized === "BLOCKED") return "INPUT";
+  if (normalized === "COMPLETED" || normalized === "FAILED" || normalized === "TIMEOUT") {
+    return "OUTPUT";
+  }
+  return null;
+}
+
 function asRecord(value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function normalizedTaskIdFromTrace(trace: unknown) {
+  const record = asRecord(trace);
+  const normalizedTask = asRecord(record.normalizedTask);
+  return typeof normalizedTask.task_id === "string" ? normalizedTask.task_id.trim() : "";
 }
 
 function toAgentPlan(prompt: string, executionTrace: unknown) {
@@ -228,8 +249,32 @@ export async function GET(request: NextRequest) {
     flowTaskOrder.set(task.flowId, entry);
   }
 
+  const flowIds = [...new Set(tasks.map((task) => task.flowId))];
+  const eventProjectionByFlow = new Map<string, Awaited<ReturnType<typeof projectRunTaskStates>>>();
+  for (const flowId of flowIds) {
+    // Keep projection deterministic by flow id.
+    // eslint-disable-next-line no-await-in-loop
+    const projected = await projectRunTaskStates({
+      orgId,
+      runId: flowId
+    });
+    eventProjectionByFlow.set(flowId, projected);
+  }
+  const eventStateByTaskId = new Map<string, string>();
+  for (const [flowId, projected] of eventProjectionByFlow.entries()) {
+    for (const state of projected) {
+      const key = `${flowId}:${state.taskId}`;
+      eventStateByTaskId.set(key, state.state);
+    }
+  }
+
   const items = tasks.map((task) => {
-    const lane = resolveLane(task);
+    const normalizedTaskId = normalizedTaskIdFromTrace(task.executionTrace);
+    const projectedState =
+      eventStateByTaskId.get(`${task.flowId}:${normalizedTaskId}`) ??
+      eventStateByTaskId.get(`${task.flowId}:${task.id}`) ??
+      null;
+    const lane = resolveLaneFromEventState(projectedState) ?? resolveLane(task);
     const linkedFiles = task.requiredFiles
       .map((fileRef) => fileByRef.get(fileRef))
       .filter((value): value is { id: string; name: string } => Boolean(value));
@@ -258,7 +303,10 @@ export async function GET(request: NextRequest) {
     const remainingInFlow = Math.max(0, counters.total - counters.completed);
     const flowOrder = flowTaskOrder.get(task.flowId) ?? [task.id];
     const taskIndex = Math.max(0, flowOrder.indexOf(task.id));
-    const output = outputByTaskId.get(task.id) ?? null;
+    const output =
+      outputByTaskId.get(normalizedTaskId) ??
+      outputByTaskId.get(task.id) ??
+      null;
 
     return {
       id: task.id,
@@ -266,6 +314,7 @@ export async function GET(request: NextRequest) {
       flowPrompt: task.flow.prompt,
       flowStatus: task.flow.status,
       lane,
+      projectedState,
       status: task.status,
       subtaskLabel: `Task ${taskIndex + 1} of ${flowOrder.length}`,
       isPausedForInput: task.isPausedForInput,
